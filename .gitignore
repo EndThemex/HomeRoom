@@ -1,0 +1,25 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+*.tsbuildinfo
+
+# local artifacts
+.screenshots/
+.trae-html-share-packages/
+.tmp/
+
+# logs
+*.log
+
+# editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# env
+.env
+.env.local
+.env.*.local
