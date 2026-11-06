@@ -1,9 +1,16 @@
 import { useRef } from 'react';
 import type { CameraMode, Layers, Tool, ViewMode } from '../types';
 import type { I18n, Lang } from '../lib/i18n';
+import type { PlanMeta } from '../lib/planDoc';
 
 interface Props {
   i18n: I18n;
+  plans: PlanMeta[];
+  activePlanId: string;
+  onSwitchPlan: (id: string) => void;
+  onNewPlan: () => void;
+  onRenamePlan: () => void;
+  onDeletePlan: () => void;
   viewMode: ViewMode;
   setViewMode: (m: ViewMode) => void;
   tool: Tool;
@@ -45,7 +52,10 @@ export function Header(p: Props) {
   const { i18n: { t }, viewMode } = p;
   const fileRef = useRef<HTMLInputElement>(null);
   const menuRef = useRef<HTMLDetailsElement>(null);
+  const planRef = useRef<HTMLDetailsElement>(null);
   const in2d = viewMode === '2d';
+  const activePlan = p.plans.find((pl) => pl.id === p.activePlanId);
+  const closePlans = () => { if (planRef.current) planRef.current.open = false; };
 
   const btn = (on: boolean, label: string, onClick: () => void, title?: string) => (
     <button className={`btn${on ? ' on' : ''}`} onClick={onClick} title={title}>{label}</button>
@@ -59,9 +69,34 @@ export function Header(p: Props) {
       </div>
 
       <div className="brand">
-        <b>{t('三室两厅两卫 · 装修设计', '3BR 2LR 2BA · Interior Design')}</b>
-        <span>{t('原始户型 1:60 · 尺寸单位 mm', 'Original plan 1:60 · units: mm')}</span>
+        <b>{activePlan?.name ?? t('未命名户型', 'Untitled plan')}</b>
+        <span>{t(`${p.plans.length} 个户型方案 · 尺寸单位 mm`, `${p.plans.length} plans · units: mm`)}</span>
       </div>
+
+      <details className="menu planmenu" ref={planRef}>
+        <summary className="btn">{t('户型 ▾', 'Plans ▾')}</summary>
+        <div className="menu-pop plans">
+          {p.plans.map((pl) => (
+            <button
+              key={pl.id}
+              className={`btn${pl.id === p.activePlanId ? ' on' : ''}`}
+              onClick={() => { p.onSwitchPlan(pl.id); closePlans(); }}
+            >
+              {pl.id === p.activePlanId ? '✓ ' : ''}{pl.name}
+            </button>
+          ))}
+          <div className="menu-sep" />
+          <button className="btn" onClick={() => { p.onNewPlan(); closePlans(); }}>{t('新建户型', 'New plan')}</button>
+          <button className="btn" onClick={() => { p.onRenamePlan(); closePlans(); }}>{t('重命名当前户型', 'Rename plan')}</button>
+          <button
+            className="btn danger"
+            disabled={p.plans.length <= 1}
+            onClick={() => { p.onDeletePlan(); closePlans(); }}
+          >
+            {t('删除当前户型', 'Delete plan')}
+          </button>
+        </div>
+      </details>
 
       <div className="seg" title={t('切换 2D / 3D (T)', 'Switch 2D / 3D (T)')}>
         <span className="pill" style={{ transform: in2d ? 'translateX(0)' : 'translateX(100%)' }} />

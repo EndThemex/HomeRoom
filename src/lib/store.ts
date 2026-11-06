@@ -1,5 +1,9 @@
 import type { DesignState, PlanDoc } from '../types';
-import { defaultDesign, STORE_KEY, cloneLayout, loadDesign, normalizeDesign } from './planDoc';
+import {
+  blankDesign, cloneLayout, defaultDesign, loadPlanIndex, newId, normalizeDesign,
+  readPlanState, removePlanState, writePlanIndex, writePlanState,
+} from './planDoc';
+import type { PlanMeta } from './planDoc';
 import { refreshRooms } from './roomTrace';
 import { wallRectsOf } from './layoutOps';
 import { openingRect } from './openings';
@@ -14,15 +18,23 @@ type Listener = () => void;
  */
 export class DesignStore {
   private state: DesignState;
+  private plans: PlanMeta[];
+  private activePlanId: string;
+  private planInfo: { plans: PlanMeta[]; activeId: string };
   private undoStack: string[] = [];
   private redoStack: string[] = [];
   private listeners = new Set<Listener>();
   private metaListeners = new Set<Listener>();
   private commitListeners = new Set<Listener>();
+  private planListeners = new Set<Listener>();
   private meta = { canUndo: false, canRedo: false };
 
-  constructor(state: DesignState = loadDesign()) {
+  constructor() {
+    const { index, state } = loadPlanIndex();
+    this.plans = index.plans;
+    this.activePlanId = index.activeId;
     this.state = state;
+    this.planInfo = { plans: this.plans.slice(), activeId: this.activePlanId };
   }
 
   /** useSyncExternalStore 要求快照在两次变更之间保持同一引用 */
@@ -45,7 +57,20 @@ export class DesignStore {
     return () => { this.commitListeners.delete(listener); };
   };
 
+  /** 户型列表 / 当前户型变化时通知（重命名等不涉及绘图状态） */
+  subscribePlans = (listener: Listener) => {
+    this.planListeners.add(listener);
+    return () => { this.planListeners.delete(listener); };
+  };
+
   getMeta = () => this.meta;
+
+  getPlanInfo = () => this.planInfo;
+
+  private emitPlans() {
+    this.planInfo = { plans: this.plans.slice(), activeId: this.activePlanId };
+    this.planListeners.forEach((l) => l());
+  }
 
   private emit() {
     const canUndo = this.undoStack.length > 0;
@@ -62,11 +87,10 @@ export class DesignStore {
   }
 
   private save() {
-    try {
-      localStorage.setItem(STORE_KEY, JSON.stringify(this.state));
-    } catch {
-      /* 隐私模式 / 存储已满：静默失败 */
-    }
+    writePlanState(this.activePlanId, this.state);
+    const meta = this.plans.find((p) => p.id === this.activePlanId);
+    if (meta) meta.updatedAt = Date.now();
+    writePlanIndex({ activeId: this.activePlanId, plans: this.plans });
   }
 
   /** 记录一次可撤销的变更（家具 / 测量等） */
@@ -209,6 +233,69 @@ export class DesignStore {
     this.save();
     this.emit();
     this.emitCommit();
+  }
+
+  /* ------------------------------ 多户型管理 ------------------------------ */
+
+  /** 切换户型：每个方案独立存档，切换后撤销 / 重做栈清空 */
+  switchPlan(id: string) {
+    if (id === this.activePlanId || !this.plans.some((p) => p.id === id)) return false;
+    this.save();
+    this.activePlanId = id;
+    this.state = readPlanState(id) ?? blankDesign();
+    this.undoStack.length = 0;
+    this.redoStack.length = 0;
+    this.save();
+    this.emitPlans();
+    this.emit();
+    this.emitCommit();
+    return true;
+  }
+
+  /** 新建空白户型并切换过去 */
+  createPlan(name: string) {
+    const now = Date.now();
+    const id = newId('plan');
+    this.save();
+    this.plans = [...this.plans, { id, name, createdAt: now, updatedAt: now }];
+    this.activePlanId = id;
+    this.state = blankDesign();
+    this.undoStack.length = 0;
+    this.redoStack.length = 0;
+    this.save();
+    this.emitPlans();
+    this.emit();
+    this.emitCommit();
+    return id;
+  }
+
+  renamePlan(id: string, name: string) {
+    const meta = this.plans.find((p) => p.id === id);
+    const clean = name.trim();
+    if (!meta || !clean || meta.name === clean) return false;
+    meta.name = clean;
+    writePlanIndex({ activeId: this.activePlanId, plans: this.plans });
+    this.emitPlans();
+    return true;
+  }
+
+  /** 删除户型（至少保留一个）；删除当前户型时自动切到第一个 */
+  deletePlan(id: string) {
+    if (this.plans.length <= 1) return false;
+    if (!this.plans.some((p) => p.id === id)) return false;
+    removePlanState(id);
+    this.plans = this.plans.filter((p) => p.id !== id);
+    if (this.activePlanId === id) {
+      this.activePlanId = this.plans[0].id;
+      this.state = readPlanState(this.activePlanId) ?? blankDesign();
+      this.undoStack.length = 0;
+      this.redoStack.length = 0;
+      this.emit();
+      this.emitCommit();
+    }
+    this.save();
+    this.emitPlans();
+    return true;
   }
 }
 

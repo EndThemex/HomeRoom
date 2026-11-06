@@ -28,6 +28,7 @@ const readBool = (key: string, dflt: boolean) => {
 export function App() {
   const state = useSyncExternalStore(store.subscribe, store.getState);
   const meta = useSyncExternalStore(store.subscribeMeta, store.getMeta);
+  const planInfo = useSyncExternalStore(store.subscribePlans, store.getPlanInfo);
 
   const [lang, setLangState] = useState<Lang>(() => (localStorage.getItem(LANG_KEY) === 'en' ? 'en' : 'zh'));
   const i18n = useMemo<I18n>(() => createI18n(lang), [lang]);
@@ -310,6 +311,59 @@ export function App() {
     else void document.documentElement.requestFullscreen();
   };
 
+  /* ---------------------------- 户型方案 ---------------------------- */
+  const fitStage = useCallback(() => {
+    if (modeRef.current === '3d') sceneRef.current?.flyIso();
+    else stageApiRef.current?.fit();
+  }, []);
+
+  const switchPlan = useCallback((id: string) => {
+    if (!store.switchPlan(id)) return;
+    setSelection(null);
+    setTool('select');
+    const name = store.getPlanInfo().plans.find((pl) => pl.id === id)?.name ?? '';
+    say(i18n.t(`已切换户型：${name}`, `Switched to: ${name}`));
+    fitStage();
+  }, [fitStage, i18n, say]);
+
+  const newPlan = useCallback(() => {
+    const fallback = `${i18n.t('新户型', 'New plan')} ${planInfo.plans.length + 1}`;
+    const input = window.prompt(i18n.t('请输入新户型名称', 'New plan name'), fallback);
+    if (input === null) return;
+    const name = input.trim() || fallback;
+    store.createPlan(name);
+    setSelection(null);
+    setTool('select');
+    say(i18n.t(
+      `已新建空白户型：${name}，可用画墙(W) / 建房(Q) 开始绘制`,
+      `Blank plan created: ${name}. Start with Wall (W) / Room (Q).`,
+    ));
+    fitStage();
+  }, [fitStage, i18n, planInfo.plans.length, say]);
+
+  const renamePlan = useCallback(() => {
+    const cur = planInfo.plans.find((pl) => pl.id === planInfo.activeId);
+    if (!cur) return;
+    const input = window.prompt(i18n.t('户型名称', 'Plan name'), cur.name);
+    if (input === null) return;
+    if (store.renamePlan(cur.id, input)) say(i18n.t('户型已重命名', 'Plan renamed'));
+  }, [i18n, planInfo, say]);
+
+  const deletePlan = useCallback(() => {
+    const cur = planInfo.plans.find((pl) => pl.id === planInfo.activeId);
+    if (!cur || planInfo.plans.length <= 1) return;
+    const ok = window.confirm(i18n.t(
+      `确定删除户型「${cur.name}」？该操作不可撤销。`,
+      `Delete plan "${cur.name}"? This cannot be undone.`,
+    ));
+    if (!ok) return;
+    if (store.deletePlan(cur.id)) {
+      setSelection(null);
+      say(i18n.t('户型已删除', 'Plan deleted'));
+      fitStage();
+    }
+  }, [fitStage, i18n, planInfo, say]);
+
   /* ---------------------------- 3D 回调 ---------------------------- */
   const onReady = useCallback((m: SceneManager | null) => {
     sceneRef.current = m;
@@ -339,6 +393,12 @@ export function App() {
     <div className="app">
       <Header
         i18n={i18n}
+        plans={planInfo.plans}
+        activePlanId={planInfo.activeId}
+        onSwitchPlan={switchPlan}
+        onNewPlan={newPlan}
+        onRenamePlan={renamePlan}
+        onDeletePlan={deletePlan}
         viewMode={viewMode}
         setViewMode={setViewModeSafe}
         tool={tool}

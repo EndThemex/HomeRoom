@@ -139,6 +139,13 @@ header {
 }
 .menu-pop .btn { text-align: left; border: 0; background: transparent; }
 .menu-pop .btn:hover { background: var(--accent-soft); }
+.menu-pop .btn.on,
+.menu-pop .btn.on:hover { background: var(--accent-soft); color: var(--accent-2); }
+.menu-pop .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.menu-pop .btn:disabled:hover { background: transparent; }
+.planmenu { max-width: 220px; }
+.menu-pop.plans { min-width: 190px; max-height: 60vh; overflow-y: auto; }
+.menu-sep { height: 1px; margin: 4px 2px; background: var(--line); }
 
 /* ------------------------------ 主区 ------------------------------ */
 

@@ -392,3 +392,109 @@ export function loadDesign(): DesignState {
   }
   return defaultDesign();
 }
+
+/* ------------------------------ 多户型（方案）存储 ------------------------------ */
+
+export const PLANS_KEY = 'homeroom-plans-v1';
+export const DEFAULT_PLAN_NAME = '三室两厅两卫';
+
+export interface PlanMeta {
+  id: string;
+  name: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface PlanIndex {
+  activeId: string;
+  plans: PlanMeta[];
+}
+
+const planStateKey = (id: string) => `homeroom-plan-${id}`;
+
+/** 空白户型：只有画布与默认层高，墙体和房间由用户自行绘制 */
+export function blankDesign(): DesignState {
+  return {
+    layout: {
+      schemaVersion: 2,
+      bounds: { x: 0, y: 0, w: 12000, h: 9000 },
+      origin: [6000, 4500],
+      floorHeight: template.floorHeight,
+      lines: [],
+      openings: [],
+      rooms: [],
+      dimensionChains: null,
+    },
+    furniture: [],
+    demolishedLines: [],
+    measures: [],
+  };
+}
+
+export function readPlanState(id: string): DesignState | null {
+  try {
+    const raw = localStorage.getItem(planStateKey(id));
+    return raw ? normalizeDesign(JSON.parse(raw)) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function writePlanState(id: string, state: DesignState) {
+  try {
+    localStorage.setItem(planStateKey(id), JSON.stringify(state));
+  } catch {
+    /* 隐私模式 / 存储已满：静默失败 */
+  }
+}
+
+export function writePlanIndex(index: PlanIndex) {
+  try {
+    localStorage.setItem(PLANS_KEY, JSON.stringify(index));
+  } catch {
+    /* 隐私模式 / 存储已满：静默失败 */
+  }
+}
+
+export function removePlanState(id: string) {
+  try {
+    localStorage.removeItem(planStateKey(id));
+  } catch {
+    /* ignore */
+  }
+}
+
+/** 读取户型索引；首次运行时把原有单方案存档迁移为「默认户型」 */
+export function loadPlanIndex(): { index: PlanIndex; state: DesignState } {
+  try {
+    const raw = localStorage.getItem(PLANS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<PlanIndex>;
+      const plans = (Array.isArray(parsed.plans) ? parsed.plans : [])
+        .filter((p): p is PlanMeta => !!p && typeof p.id === 'string' && typeof p.name === 'string');
+      if (plans.length) {
+        const activeId = typeof parsed.activeId === 'string' && plans.some((p) => p.id === parsed.activeId)
+          ? parsed.activeId
+          : plans[0].id;
+        let state = readPlanState(activeId);
+        if (!state) {
+          state = blankDesign();
+          writePlanState(activeId, state);
+        }
+        return { index: { activeId, plans }, state };
+      }
+    }
+  } catch {
+    /* 索引损坏：按首次运行处理 */
+  }
+  const state = loadDesign();
+  const now = Date.now();
+  const id = newId('plan');
+  const index: PlanIndex = {
+    activeId: id,
+    plans: [{ id, name: DEFAULT_PLAN_NAME, createdAt: now, updatedAt: now }],
+  };
+  writePlanIndex(index);
+  writePlanState(id, state);
+  return { index, state };
+}
