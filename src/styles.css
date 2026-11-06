@@ -146,6 +146,44 @@ header {
 .planmenu { max-width: 220px; }
 .menu-pop.plans { min-width: 190px; max-height: 60vh; overflow-y: auto; }
 .menu-sep { height: 1px; margin: 4px 2px; background: var(--line); }
+.menu-pop.wide { min-width: 196px; }
+.menu-pop .group-title {
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  padding: 6px 8px 2px;
+}
+.menu-pop .row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.menu-pop .row:hover { background: var(--accent-soft); }
+.menu-pop .row input { margin: 0; accent-color: var(--accent); cursor: pointer; }
+.menu-pop .kbd {
+  float: right;
+  margin-left: 12px;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-style: normal;
+}
+.menu-pop .menu-note {
+  padding: 6px 8px 2px;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.menu-pop .range.sun { padding: 5px 8px; }
+.menu-pop .range.sun input[type="range"] { width: 132px; }
+
+.btn.icon { padding: 5px 8px; min-width: 30px; text-align: center; font-size: 13px; line-height: 1.1; }
+.menu summary.planname { display: inline-flex; align-items: center; gap: 6px; max-width: 200px; font-weight: 650; }
+.planname > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.planname > i { font-style: normal; font-size: 10.5px; color: var(--muted); }
 
 /* ------------------------------ 主区 ------------------------------ */
 

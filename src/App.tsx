@@ -301,6 +301,11 @@ export function App() {
   }, [i18n, say]);
 
   const resetPlan = useCallback(() => {
+    const ok = window.confirm(i18n.t(
+      '确定重置为默认方案？当前户型内容会被覆盖（可撤销）。',
+      'Reset to the default plan? Current content will be replaced (undoable).',
+    ));
+    if (!ok) return;
     store.reset();
     setSelection(null);
     say(i18n.t('已重置为默认方案（可撤销）', 'Reset to default (undoable)'));
@@ -422,6 +427,12 @@ export function App() {
         onUndo={() => store.undo()}
         onRedo={() => store.redo()}
         onClear={() => {
+          if (!state.furniture.length) return;
+          const ok = window.confirm(i18n.t(
+            '确定清空所有家具？该操作可撤销。',
+            'Remove all furniture? This can be undone.',
+          ));
+          if (!ok) return;
           store.mutate((d) => { d.furniture = []; });
           setSelection(null);
           say(i18n.t('已清空所有家具（可撤销）', 'All furniture removed (undoable)'));
