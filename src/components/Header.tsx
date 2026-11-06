@@ -72,8 +72,13 @@ export function Header(p: Props) {
       {in2d && (
         <div className="grp">
           {btn(p.tool === 'select', t('选择', 'Select'), () => p.setTool('select'), t('选择 / 移动 (V)', 'Select / Move (V)'))}
+          {btn(p.tool === 'wall', t('画墙', 'Wall'), () => p.setTool('wall'), t('画墙 (W)', 'Draw wall (W)'))}
+          {btn(p.tool === 'room', t('建房', 'Room'), () => p.setTool('room'), t('快速建房 (Q)', 'Draw room (Q)'))}
+          {btn(p.tool === 'door', t('门', 'Door'), () => p.setTool('door'), t('放置门 (D)', 'Door (D)'))}
+          {btn(p.tool === 'window', t('窗', 'Window'), () => p.setTool('window'), t('放置窗 (N)', 'Window (N)'))}
+          {btn(p.tool === 'slide', t('推拉门', 'Slide'), () => p.setTool('slide'), t('放置推拉门 (S)', 'Sliding door (S)'))}
           {btn(p.tool === 'measure', t('测量', 'Measure'), () => p.setTool('measure'), t('测量 (M)', 'Measure (M)'))}
-          {btn(p.tool === 'demolish', t('拆改墙体', 'Demolish'), () => p.setTool('demolish'), t('拆改非承重墙 (X)', 'Demolish non-bearing walls (X)'))}
+          {btn(p.tool === 'demolish', t('拆改墙体', 'Demolish'), () => p.setTool('demolish'), t('拆改非承重墙 (X)', 'Demolish walls (X)'))}
         </div>
       )}
 
@@ -110,7 +115,7 @@ export function Header(p: Props) {
         <div className="grp">
           {(Object.keys(p.layers) as (keyof Layers)[]).map((k) => (
             <button key={k} className={`btn chip${p.layers[k] ? ' on' : ''}`} onClick={() => p.toggleLayer(k)}>
-              {k === 'dims' ? t('尺寸', 'Dims') : k === 'labels' ? t('房间', 'Rooms') : k === 'furn' ? t('家具', 'Furniture') : k === 'grid' ? t('网格', 'Grid') : k === 'bearing' ? t('承重墙', 'Bearing') : t('贴墙吸附', 'Wall snap')}
+              {k === 'dims' ? t('尺寸', 'Dims') : k === 'labels' ? t('房间名', 'Labels') : k === 'furn' ? t('家具', 'Furniture') : k === 'grid' ? t('网格', 'Grid') : k === 'bearing' ? t('承重墙', 'Bearing') : k === 'walls' ? t('墙线', 'Walls') : k === 'openings' ? t('门窗', 'Openings') : t('贴墙吸附', 'Wall snap')}
             </button>
           ))}
         </div>

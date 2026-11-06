@@ -2,7 +2,78 @@ export type WallKind = 'b' | 'e' | 'n' | 'low';
 
 export type Point = [number, number];
 
+export type Axis = 'h' | 'v';
+
+/** 墙线：持久化的墙体主体（本期的存储粒度） */
+export interface WallLine {
+  id: string;
+  axis: Axis;
+  kind: WallKind;
+  band: [number, number];
+  span: [number, number];
+}
+
+/** 墙块：由墙线 span 减去洞口派生，不持久化（用于 2D/3D 渲染与命中） */
 export interface WallData {
+  id: string;
+  lineId: string;
+  x0: number; y0: number; x1: number; y1: number;
+  kind: WallKind;
+}
+
+export type OpeningKind = 'door' | 'window' | 'slide';
+
+/** 门窗洞口：位于某条墙线的区间 */
+export interface OpeningData {
+  id: string;
+  lineId: string;
+  kind: OpeningKind;
+  span: [number, number];
+  sill?: number;
+  head?: number;
+  hingeEnd?: 'start' | 'end';
+  swing?: 1 | -1;
+  entry?: boolean;
+}
+
+/** 门参数派生出的门扇实例 */
+export interface DoorRender {
+  hinge: Point;
+  closedDir: Point;
+  openDir: Point;
+  len: number;
+  entry: boolean;
+}
+
+export interface RoomData {
+  id: string;
+  name: string;
+  nameEn: string;
+  poly: Point[];
+  mat: string;
+  labelAt?: Point;
+  counted?: boolean;
+}
+
+export interface DimensionChains {
+  horizontal: { at: number; start: number; segs: number[] }[];
+  vertical: { at: number; start: number; segs: number[] }[];
+}
+
+export interface PlanDoc {
+  schemaVersion: 2;
+  bounds: { x: number; y: number; w: number; h: number };
+  origin: Point;
+  floorHeight: number;
+  lines: WallLine[];
+  openings: OpeningData[];
+  rooms: RoomData[];
+  dimensionChains: DimensionChains | null;
+}
+
+/* ------------------------- 旧静态模板结构（仅用于模板与迁移） ------------------------- */
+
+export interface LegacyWallData {
   x0: number; y0: number; x1: number; y1: number;
   kind: WallKind;
 }
@@ -27,16 +98,6 @@ export interface DoorData {
 export interface SlideData {
   rect: [number, number, number, number];
   vertical: boolean;
-}
-
-export interface RoomData {
-  id: string;
-  name: string;
-  nameEn: string;
-  poly: Point[];
-  mat: string;
-  labelAt?: Point;
-  counted?: boolean;
 }
 
 export interface MaterialData {
@@ -79,7 +140,7 @@ export interface FloorPlanData {
   bounds: { x: number; y: number; w: number; h: number };
   origin: Point;
   floorHeight: number;
-  walls: WallData[];
+  walls: LegacyWallData[];
   windows: WindowData[];
   doors: DoorData[];
   slides: SlideData[];
@@ -87,10 +148,7 @@ export interface FloorPlanData {
   materials: Record<string, MaterialData>;
   catalog: CatalogCategory[];
   initialFurniture: FurnitureSeed[];
-  dimensionChains: {
-    horizontal: { at: number; start: number; segs: number[] }[];
-    vertical: { at: number; start: number; segs: number[] }[];
-  };
+  dimensionChains: DimensionChains;
 }
 
 export interface Furniture {
@@ -110,12 +168,14 @@ export interface Measure {
   b: { x: number; y: number };
 }
 
-export interface RoomState {
+export interface LegacyRoomState {
   name: string;
   mat: string;
 }
 
-export type Tool = 'select' | 'measure' | 'demolish';
+export type Tool =
+  | 'select' | 'wall' | 'room' | 'door' | 'window' | 'slide'
+  | 'measure' | 'demolish';
 
 export interface Layers {
   dims: boolean;
@@ -124,17 +184,19 @@ export interface Layers {
   grid: boolean;
   bearing: boolean;
   wallSnap: boolean;
+  walls: boolean;
+  openings: boolean;
 }
 
 export interface DesignState {
+  layout: PlanDoc;
   furniture: Furniture[];
-  rooms: Record<string, RoomState>;
-  demolished: string[];
+  demolishedLines: string[];
   measures: Measure[];
 }
 
 export interface Selection {
-  kind: 'furn' | 'room';
+  kind: 'furn' | 'room' | 'wall' | 'door' | 'window' | 'slide';
   id: string;
 }
 

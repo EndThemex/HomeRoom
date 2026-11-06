@@ -1,9 +1,14 @@
 import { useEffect, useState } from 'react';
-import type { DesignState, Selection } from '../types';
+import type { DesignState, Selection, WallKind } from '../types';
 import type { DesignStore } from '../lib/store';
 import type { I18n } from '../lib/i18n';
-import { plan, roomById } from '../lib/plan';
+import { plan } from '../lib/plan';
 import { areaOf, fmt, normAngle } from '../lib/geometry';
+import { lineById, resizeWallLine, setLineKind, setLineThickness, deleteWallLine, deleteOpening } from '../lib/layoutOps';
+import {
+  clampWidth, moveOpening, resizeOpening, setDoorSwing,
+  setOpeningSillHead, widthOf, widthRange,
+} from '../lib/openings';
 
 interface Props {
   store: DesignStore;
@@ -42,34 +47,54 @@ function Num({ label, value, unit, onCommit, step = 10 }: { label: string; value
 }
 
 export function Panel({ store, state, i18n, selection, onSelect, open, onClose }: Props) {
-  const { nm, t } = i18n;
+  const { nm, t, rn } = i18n;
   const [nameDraft, setNameDraft] = useState('');
 
   const f = selection?.kind === 'furn' ? state.furniture.find((x) => x.id === selection.id) : null;
-  const room = selection?.kind === 'room' ? roomById(selection.id) : null;
-  const rs = room ? state.rooms[room.id] : null;
+  const room = selection?.kind === 'room' ? state.layout.rooms.find((x) => x.id === selection.id) : null;
+  const wall = selection?.kind === 'wall' ? lineById(state.layout, selection.id) : null;
+  const opening = selection && selection.kind !== 'furn' && selection.kind !== 'room' && selection.kind !== 'wall'
+    ? state.layout.openings.find((x) => x.id === selection.id) ?? null
+    : null;
+  const opLine = opening ? lineById(state.layout, opening.lineId) : null;
 
-  useEffect(() => { setNameDraft(rs?.name ?? ''); }, [room?.id, rs?.name]);
+  useEffect(() => { setNameDraft(room?.name ?? ''); }, [room?.id, room?.name]);
 
   const patchFurn = (fn: (x: NonNullable<typeof f>) => void) => {
     if (!f) return;
     store.mutate(() => fn(f));
   };
 
-  const netArea = plan.rooms.filter((r) => r.counted !== false).reduce((a, r) => a + areaOf(r.poly), 0);
+  const rooms = state.layout.rooms;
+  const netArea = rooms.filter((r) => r.counted !== false).reduce((a, r) => a + areaOf(r.poly), 0);
 
-  const roomCost = (id: string) => {
-    const r = plan.rooms.find((x) => x.id === id)!;
+  const roomCost = (r: NonNullable<typeof room>) => {
     if (r.counted === false) return 0;
-    const mat = plan.materials[state.rooms[id]?.mat ?? r.mat];
+    const mat = plan.materials[r.mat] ?? plan.materials.tile800;
     return areaOf(r.poly) * 1.05 * mat.price;
   };
-  const totalCost = plan.rooms.reduce((a, r) => a + roomCost(r.id), 0);
+  const totalCost = rooms.reduce((a, r) => a + roomCost(r), 0);
+
+  const openingKindName = (kind: string) =>
+    kind === 'door' ? t('门', 'Door') : kind === 'window' ? t('窗', 'Window') : t('推拉门', 'Sliding door');
+
+  const title = f ? t('家具属性', 'Furniture')
+    : room ? t('房间属性', 'Room')
+      : wall ? t('墙线属性', 'Wall line')
+        : opening ? t(`${openingKindName(opening.kind)}属性`, `${openingKindName(opening.kind)} properties`)
+          : t('方案总览', 'Overview');
+
+  const setOpeningSpanStart = (id: string, start: number) => {
+    const o = state.layout.openings.find((x) => x.id === id);
+    if (!o) return;
+    const delta = start - o.span[0];
+    store.mutateLayout((layout) => { moveOpening(layout, id, delta); });
+  };
 
   return (
     <aside className={`panel props${open ? ' open' : ''}`}>
       <div className="panel-head">
-        {f ? t('家具属性', 'Furniture') : room ? t('房间属性', 'Room') : t('方案总览', 'Overview')}
+        {title}
         <button className="btn close" onClick={onClose} title={t('收起面板', 'Hide panel')}>×</button>
       </div>
 
@@ -117,7 +142,7 @@ export function Panel({ store, state, i18n, selection, onSelect, open, onClose }
         </div>
       )}
 
-      {room && rs && (
+      {room && (
         <div className="propsbody">
           <label className="field">
             <span>{t('房间名称', 'Room name')}</span>
@@ -126,22 +151,43 @@ export function Panel({ store, state, i18n, selection, onSelect, open, onClose }
               onChange={(e) => setNameDraft(e.target.value)}
               onBlur={() => {
                 const v = nameDraft.trim();
-                if (v && v !== rs.name) store.mutate((d) => { d.rooms[room.id].name = v; });
+                if (v && v !== room.name) {
+                  store.mutate((d) => {
+                    const r = d.layout.rooms.find((x) => x.id === room.id);
+                    if (r) { r.name = v; r.nameEn = v; }
+                  });
+                }
               }}
             />
           </label>
           <div className="statline">
             <span>{t('面积', 'Area')}</span><b>{fmt(areaOf(room.poly))} m²</b>
           </div>
-          {room.counted === false && <div className="tiny">{t('飘窗 / 不参与套内面积统计', 'Bay window · excluded from net area')}</div>}
+          <label className="field">
+            <span>{t('参与面积统计', 'Counted in net area')}</span>
+            <input
+              type="checkbox"
+              checked={room.counted !== false}
+              onChange={(e) => {
+                const on = e.target.checked;
+                store.mutate((d) => {
+                  const r = d.layout.rooms.find((x) => x.id === room.id);
+                  if (r) r.counted = on ? undefined : false;
+                });
+              }}
+            />
+          </label>
 
           <div className="field">
             <span>{t('地面材料', 'Floor material')}</span>
             <div className="matgrid">
               {Object.entries(plan.materials).map(([k, m]) => {
-                const on = rs.mat === k;
+                const on = room.mat === k;
                 return (
-                  <button key={k} className={`mat${on ? ' on' : ''}`} onClick={() => store.mutate((d) => { d.rooms[room.id].mat = k; })}>
+                  <button key={k} className={`mat${on ? ' on' : ''}`} onClick={() => store.mutate((d) => {
+                    const r = d.layout.rooms.find((x) => x.id === room.id);
+                    if (r) r.mat = k;
+                  })}>
                     <i className={on ? 'sw on' : 'sw'} style={{ background: m.swatch }} />
                     <em>{nm(m.name)}</em>
                     <small>¥{m.price}/m²</small>
@@ -154,7 +200,7 @@ export function Panel({ store, state, i18n, selection, onSelect, open, onClose }
           {room.counted !== false && (
             <div className="statline">
               <span>{t('地面造价（含 5% 损耗）', 'Floor cost (+5% waste)')}</span>
-              <b>¥{Math.round(roomCost(room.id)).toLocaleString()}</b>
+              <b>¥{Math.round(roomCost(room)).toLocaleString()}</b>
             </div>
           )}
           <div className="hintbox">
@@ -163,23 +209,181 @@ export function Panel({ store, state, i18n, selection, onSelect, open, onClose }
         </div>
       )}
 
-      {!f && !room && (
+      {wall && (
+        <div className="propsbody">
+          <div className="selname">{t('墙线', 'Wall line')} · {wall.id}</div>
+          <div className="tiny">
+            {wall.axis === 'h' ? t('水平墙', 'Horizontal') : t('垂直墙', 'Vertical')}
+            {' · '}
+            {state.layout.openings.filter((o) => o.lineId === wall.id).length} {t('个洞口', 'openings')}
+          </div>
+          <div className="rowfields">
+            <Num
+              label={t('墙长', 'Length')}
+              value={wall.span[1] - wall.span[0]}
+              unit="mm"
+              step={100}
+              onCommit={(v) => store.mutateLayout((layout) => {
+                resizeWallLine(layout, wall.id, 'end', wall.span[0] + v);
+              })}
+            />
+            <Num
+              label={t('墙厚', 'Thickness')}
+              value={Math.round(wall.band[1] - wall.band[0])}
+              unit="mm"
+              step={10}
+              onCommit={(v) => store.mutateLayout((layout) => { setLineThickness(layout, wall.id, v); })}
+            />
+          </div>
+          <div className="field">
+            <span>{t('墙体类型', 'Wall type')}</span>
+            <div className="btnrow">
+              {([
+                ['b', t('承重墙', 'Bearing'), '承重墙（不可拆）', 'Bearing (not removable)'],
+                ['e', t('外墙', 'Exterior'), '外墙', 'Exterior wall'],
+                ['n', t('隔墙', 'Partition'), '隔墙（可拆改）', 'Partition (removable)'],
+                ['low', t('矮墙', 'Low'), '矮墙 / 半墙', 'Low wall'],
+              ] as [WallKind, string, string, string][]).map(([kind, label, zh, en]) => (
+                <button
+                  key={kind}
+                  className={`btn${wall.kind === kind ? ' on' : ''}`}
+                  onClick={() => store.mutateLayout((layout) => { setLineKind(layout, wall.id, kind); })}
+                  title={t(zh, en)}
+                >{label}</button>
+              ))}
+            </div>
+          </div>
+          <div className="btnrow">
+            <button
+              className={`btn${state.demolishedLines.includes(wall.id) ? ' on' : ''}`}
+              onClick={() => store.toggleDemolish(wall.id)}
+            >
+              {state.demolishedLines.includes(wall.id) ? t('恢复墙线', 'Restore') : t('拆改墙线', 'Demolish')}
+            </button>
+            <button className="btn danger" onClick={() => {
+              store.mutateLayout((layout) => { deleteWallLine(layout, wall.id); });
+              onSelect(null);
+            }}>{t('删除墙线', 'Delete')}</button>
+          </div>
+          <div className="hintbox">
+            {t('拖动端点改墙长，拖动侧面手柄改墙厚；承重墙不可拆改。', 'Drag endpoints to resize, side handle to change thickness. Bearing walls cannot be demolished.')}
+          </div>
+        </div>
+      )}
+
+      {opening && opLine && (
+        <div className="propsbody">
+          <div className="selname">{openingKindName(opening.kind)}</div>
+          <div className="tiny">{t('所属墙线', 'Host line')}: {opLine.id} · {widthOf(opening)} mm</div>
+          <div className="rowfields">
+            <Num
+              label={t('宽度', 'Width')}
+              value={Math.round(widthOf(opening))}
+              unit="mm"
+              step={10}
+              onCommit={(v) => store.mutateLayout((layout) => {
+                const [lo, hi] = widthRange(opening.kind);
+                const w = Math.max(lo, Math.min(hi, clampWidth(opening.kind, v)));
+                resizeOpening(layout, opening.id, 'end', opening.span[0] + w);
+              })}
+            />
+            <Num
+              label={t('距墙起点', 'From line start')}
+              value={Math.round(opening.span[0] - opLine.span[0])}
+              unit="mm"
+              step={10}
+              onCommit={(v) => setOpeningSpanStart(opening.id, opLine.span[0] + v)}
+            />
+          </div>
+
+          {opening.kind === 'window' && (
+            <div className="rowfields">
+              <Num label={t('窗台高', 'Sill')} value={opening.sill ?? 900} unit="mm" onCommit={(v) => store.mutateLayout((layout) => { setOpeningSillHead(layout, opening.id, v, undefined); })} />
+              <Num label={t('窗顶高', 'Head')} value={opening.head ?? 2400} unit="mm" onCommit={(v) => store.mutateLayout((layout) => { setOpeningSillHead(layout, opening.id, undefined, v); })} />
+            </div>
+          )}
+
+          {opening.kind === 'door' && (
+            <>
+              <div className="rowfields">
+                <Num label={t('门高', 'Door height')} value={opening.head ?? 2100} unit="mm" onCommit={(v) => store.mutateLayout((layout) => { setOpeningSillHead(layout, opening.id, undefined, v); })} />
+                <label className="field">
+                  <span>{t('入户门', 'Entry door')}</span>
+                  <input
+                    type="checkbox"
+                    checked={!!opening.entry}
+                    onChange={(e) => {
+                      const on = e.target.checked;
+                      store.mutateLayout((layout) => {
+                        layout.openings.forEach((o) => { o.entry = false; });
+                        const o = layout.openings.find((x) => x.id === opening.id);
+                        if (o) o.entry = on;
+                      });
+                    }}
+                  />
+                </label>
+              </div>
+              <div className="field">
+                <span>{t('开启方向', 'Swing direction')}</span>
+                <div className="btnrow">
+                  {([
+                    ['start', 1, t('起点内开', 'Start inward'), t('铰链在起点，向室内开', 'Hinge at start, opens inward')],
+                    ['start', -1, t('起点外开', 'Start outward'), t('铰链在起点，向室外开', 'Hinge at start, opens outward')],
+                    ['end', 1, t('终点内开', 'End inward'), t('铰链在终点，向室内开', 'Hinge at end, opens inward')],
+                    ['end', -1, t('终点外开', 'End outward'), t('铰链在终点，向室外开', 'Hinge at end, opens outward')],
+                  ] as ['start' | 'end', 1 | -1, string, string][]).map(([hinge, swing, label, desc]) => (
+                    <button
+                      key={`${hinge}${swing}`}
+                      className={`btn${(opening.hingeEnd ?? 'start') === hinge && (opening.swing ?? 1) === swing ? ' on' : ''}`}
+                      onClick={() => store.mutateLayout((layout) => { setDoorSwing(layout, opening.id, hinge, swing); })}
+                      title={desc}
+                    >{label}</button>
+                  ))}
+                </div>
+              </div>
+              <div className="hintbox">
+                {t('门扇开向可一键切换四种状态；入户门在平面图与 3D 中都有标记。', 'Swing presets cover all four states. Entry doors are marked in 2D and 3D.')}
+              </div>
+            </>
+          )}
+
+          {opening.kind === 'slide' && (
+            <div className="field">
+              <span>{t('推拉面方向', 'Panel side')}</span>
+              <div className="btnrow">
+                <button className={`btn${opening.swing === 1 ? ' on' : ''}`} onClick={() => store.mutateLayout((layout) => { setDoorSwing(layout, opening.id, opening.hingeEnd ?? 'start', 1); })}>{t('正向', 'Side A')}</button>
+                <button className={`btn${opening.swing === -1 ? ' on' : ''}`} onClick={() => store.mutateLayout((layout) => { setDoorSwing(layout, opening.id, opening.hingeEnd ?? 'start', -1); })}>{t('反向', 'Side B')}</button>
+              </div>
+            </div>
+          )}
+
+          <div className="btnrow">
+            <button className="btn danger" onClick={() => {
+              store.mutateLayout((layout) => { deleteOpening(layout, opening.id); });
+              onSelect(null);
+            }}>{t('删除洞口', 'Delete opening')}</button>
+          </div>
+        </div>
+      )}
+
+      {!f && !room && !wall && !opening && (
         <div className="propsbody">
           <div className="bigstat">
             <div><b>{fmt(netArea, 2)}</b><span>m²</span><em>{t('套内使用面积', 'Net floor area')}</em></div>
             <div><b>{state.furniture.length}</b><span>{t('件', 'pcs')}</span><em>{t('已放置家具', 'Furniture placed')}</em></div>
           </div>
-          <div className="statline"><span>{t('房间数量', 'Rooms')}</span><b>{plan.rooms.filter((r) => r.counted !== false).length}</b></div>
+          <div className="statline"><span>{t('房间数量', 'Rooms')}</span><b>{rooms.filter((r) => r.counted !== false).length}</b></div>
+          <div className="statline"><span>{t('墙线 / 洞口', 'Wall lines / openings')}</span><b>{state.layout.lines.length} / {state.layout.openings.length}</b></div>
           <div className="statline"><span>{t('地面材料总造价', 'Total floor cost')}</span><b>¥{Math.round(totalCost).toLocaleString()}</b></div>
           <div className="sect-title">{t('地面材料用量', 'Floor materials')}</div>
           <table className="costtable">
             <thead><tr><th>{t('房间', 'Room')}</th><th>{t('材料', 'Material')}</th><th>{t('造价', 'Cost')}</th></tr></thead>
             <tbody>
-              {plan.rooms.filter((r) => r.counted !== false).map((r) => (
+              {rooms.filter((r) => r.counted !== false).map((r) => (
                 <tr key={r.id} onClick={() => onSelect({ kind: 'room', id: r.id })}>
-                  <td>{nm(state.rooms[r.id]?.name ?? r.name)}</td>
-                  <td>{nm(plan.materials[state.rooms[r.id]?.mat ?? r.mat].name)}</td>
-                  <td>¥{Math.round(roomCost(r.id)).toLocaleString()}</td>
+                  <td>{rn(r)}</td>
+                  <td>{nm(plan.materials[r.mat]?.name ?? r.mat)}</td>
+                  <td>¥{Math.round(roomCost(r)).toLocaleString()}</td>
                 </tr>
               ))}
             </tbody>

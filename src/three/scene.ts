@@ -3,12 +3,14 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { PointerLockControls } from 'three/examples/jsm/controls/PointerLockControls.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { CSS2DRenderer, CSS2DObject } from 'three/examples/jsm/renderers/CSS2DRenderer.js';
-import type { CameraMode, DesignState, Point, RoomState, Selection, ViewTransform, WallData } from '../types';
+import type { CameraMode, DesignState, Point, Selection, ViewTransform } from '../types';
 import type { DesignStore } from '../lib/store';
 import type { I18n } from '../lib/i18n';
 import { plan } from '../lib/plan';
 import { bboxOf, PX_MM } from '../lib/geometry';
 import { snapMove } from '../lib/snap';
+import { wallRectsOf } from '../lib/layoutOps';
+import { doorRender, openingRect } from '../lib/openings';
 import { buildFurniture } from './furnitureModels';
 import { mat, setEnv } from './kit';
 
@@ -84,17 +86,23 @@ export class SceneManager {
   private readonly ray = new THREE.Raycaster();
   private readonly ptr = new THREE.Vector2();
   private readonly clock = new THREE.Clock();
+  private unsubCommit: () => void;
+  private dirtyAt = 0;
 
   constructor(host: HTMLElement, store: DesignStore, glue: SceneGlue) {
     this.host = host;
     this.store = store;
     this.glue = glue;
     this.bindKeys();
+    // 提交事件合并为 200ms 内的单次重建，拖动过程不重建
+    this.unsubCommit = this.store.subscribeCommit(() => {
+      if (this.active) this.dirtyAt = performance.now();
+    });
   }
 
   private get state(): DesignState { return this.store.getState(); }
-  private wx(x: number) { return (x - plan.origin[0]) / 1000; }
-  private wz(y: number) { return (y - plan.origin[1]) / 1000; }
+  private wx(x: number) { return (x - this.state.layout.origin[0]) / 1000; }
+  private wz(y: number) { return (y - this.state.layout.origin[1]) / 1000; }
   private get W() { return this.host.clientWidth || 1; }
   private get H() { return this.host.clientHeight || 1; }
 
@@ -334,9 +342,9 @@ export class SceneManager {
 
   sync(force = false) {
     if (!this.inited || (!this.active && !force)) return;
-    const a = JSON.stringify([this.state.rooms, this.state.demolished, this.opt.cut, this.state.measures]);
+    const a = JSON.stringify([this.state.layout, this.state.demolishedLines, this.opt.cut, this.state.measures]);
     const f = JSON.stringify(this.state.furniture);
-    const l = JSON.stringify([this.state.rooms, this.opt.cut, this.glue.getI18n().lang]);
+    const l = JSON.stringify([this.state.layout.rooms, this.opt.cut, this.glue.getI18n().lang]);
     if (force || a !== this.sigArch) { this.sigArch = a; this.buildArch(); }
     if (force || f !== this.sigFurn) { this.sigFurn = f; this.buildFurn(); }
     if (force || l !== this.sigLabels) { this.sigLabels = l; this.buildLabels(); }
@@ -352,8 +360,15 @@ export class SceneManager {
   }
 
   private snapRects() {
-    const dem = this.state.demolished;
-    return [...plan.walls.filter((_, i) => !dem.includes('w' + i)), ...plan.windows];
+    const doc = this.state.layout;
+    const walls = wallRectsOf(doc, this.state.demolishedLines);
+    const wins = doc.openings.filter((o) => o.kind === 'window' && !this.state.demolishedLines.includes(o.lineId)).flatMap((o) => {
+      const line = doc.lines.find((l) => l.id === o.lineId);
+      if (!line) return [];
+      const [x0, y0, x1, y1] = openingRect(line, o);
+      return [{ x0, y0, x1, y1 }];
+    });
+    return [...walls, ...wins];
   }
 
   /* ---------------------------------- 地面材质 ---------------------------------- */
@@ -493,11 +508,13 @@ export class SceneManager {
     this.doors.length = 0;
     this.colliders = [];
     const top = this.opt.cut;
+    const doc = this.state.layout;
+    const fh = doc.floorHeight;
+    const lineOf = (lineId: string) => doc.lines.find((l) => l.id === lineId) ?? null;
+    const live = (lineId: string) => !this.state.demolishedLines.includes(lineId);
 
-    plan.rooms.forEach((r) => {
-      const roomState: RoomState | undefined = this.state.rooms[r.id];
-      const kind = roomState?.mat ?? r.mat;
-      const fm = this.floorMat(kind);
+    doc.rooms.forEach((r) => {
+      const fm = this.floorMat(r.mat);
       const bay = r.counted === false;
       const geo = bay
         ? new THREE.ExtrudeGeometry(this.shapeOf(r.poly), { depth: 0.45, bevelEnabled: false })
@@ -516,8 +533,8 @@ export class SceneManager {
       const cg = new THREE.ShapeGeometry(this.shapeOf(r.poly, true));
       cg.rotateX(Math.PI / 2);
       const ceil = new THREE.Mesh(cg, mat('#fbfaf7', { roughness: 1 }));
-      ceil.position.y = plan.floorHeight;
-      ceil.visible = top >= plan.floorHeight;
+      ceil.position.y = fh;
+      ceil.visible = top >= fh;
       this.archUp.add(ceil);
 
       if (r.labelAt) {
@@ -525,49 +542,57 @@ export class SceneManager {
           new THREE.CylinderGeometry(0.22, 0.22, 0.02, 32),
           new THREE.MeshStandardMaterial({ color: '#fff', emissive: '#fff2d6', emissiveIntensity: 0.3 }),
         );
-        lamp.position.set(this.wx(r.labelAt[0]), plan.floorHeight - 0.012, this.wz(r.labelAt[1]));
-        lamp.visible = top >= plan.floorHeight;
+        lamp.position.set(this.wx(r.labelAt[0]), fh - 0.012, this.wz(r.labelAt[1]));
+        lamp.visible = top >= fh;
         this.lampG.add(lamp);
         const pl = new THREE.PointLight(0xffd9a8, 0, 7, 1.6);
-        pl.position.set(this.wx(r.labelAt[0]), plan.floorHeight - 0.25, this.wz(r.labelAt[1]));
+        pl.position.set(this.wx(r.labelAt[0]), fh - 0.25, this.wz(r.labelAt[1]));
         this.lampG.add(pl);
       }
     });
 
-    [...plan.doors.map((d) => d.rect), ...plan.slides.map((d) => d.rect)].forEach(([x0, y0, x1, y1]) => {
+    // 门洞 / 推拉门地面过门石
+    doc.openings.filter((o) => o.kind !== 'window' && live(o.lineId)).forEach((o) => {
+      const line = lineOf(o.lineId);
+      if (!line) return;
+      const [x0, y0, x1, y1] = openingRect(line, o);
       const s = new THREE.Mesh(
         new THREE.BoxGeometry((x1 - x0) / 1000, 0.012, (y1 - y0) / 1000),
         mat('#d8d0c0', { roughness: 0.3 }),
       );
       s.position.set(this.wx((x0 + x1) / 2), 0, this.wz((y0 + y1) / 2));
-      s.castShadow = false;
       this.archFloor.add(s);
     });
 
-    plan.walls.forEach((w: WallData, i) => {
-      if (this.state.demolished.includes('w' + i)) return;
+    wallRectsOf(doc, this.state.demolishedLines).forEach((w) => {
       this.wallBox([w.x0, w.y0, w.x1, w.y1], 0, w.kind === 'low' ? Math.min(1, top) : top);
       this.colliders.push([this.wx(w.x0), this.wz(w.y0), this.wx(w.x1), this.wz(w.y1)]);
     });
 
-    // 门洞 / 推拉门 / 飘窗洞口上方的过梁
-    [...plan.doors.map((d) => [d.rect, 2.1] as [[number, number, number, number], number]),
-      ...plan.slides.map((s) => [s.rect, s.vertical ? 2.4 : 2.1] as [[number, number, number, number], number])]
-      .forEach(([r, h]) => { if (top > h) this.wallBox(r, h, top); });
-    plan.rooms.filter((r) => r.counted === false).forEach((r) => {
+    // 门洞 / 推拉门 上方的过梁
+    doc.openings.filter((o) => o.kind !== 'window' && live(o.lineId)).forEach((o) => {
+      const line = lineOf(o.lineId);
+      if (!line) return;
+      const rect = openingRect(line, o);
+      const headM = (o.head ?? (o.kind === 'slide' ? 2400 : 2100)) / 1000;
+      if (top > headM) this.wallBox(rect, headM, top);
+    });
+    doc.rooms.filter((r) => r.counted === false).forEach((r) => {
       const [x0, y0, x1, y1] = bboxOf(r.poly);
       if (top > 2.4) this.wallBox([x0, y0, x1, y1], 2.4, top);
     });
 
-    plan.windows.forEach((r) => {
-      const sill = r.sill;
-      const head = r.head;
-      this.wallBox([r.x0, r.y0, r.x1, r.y1], 0, Math.min(sill, top));
-      if (top > head) this.wallBox([r.x0, r.y0, r.x1, r.y1], head, top);
-      this.colliders.push([this.wx(r.x0), this.wz(r.y0), this.wx(r.x1), this.wz(r.y1)]);
+    doc.openings.filter((o) => o.kind === 'window' && live(o.lineId)).forEach((o) => {
+      const line = lineOf(o.lineId);
+      if (!line) return;
+      const [x0, y0, x1, y1] = openingRect(line, o);
+      const sill = (o.sill ?? 900) / 1000;
+      const head = (o.head ?? 2400) / 1000;
+      this.wallBox([x0, y0, x1, y1], 0, Math.min(sill, top));
+      if (top > head) this.wallBox([x0, y0, x1, y1], head, top);
+      this.colliders.push([this.wx(x0), this.wz(y0), this.wx(x1), this.wz(y1)]);
       const gTop = Math.min(head, top);
       if (gTop <= sill) return;
-      const [x0, y0, x1, y1] = [r.x0, r.y0, r.x1, r.y1];
       const hz = x1 - x0 >= y1 - y0;
       const L = (hz ? x1 - x0 : y1 - y0) / 1000;
       const gh = gTop - sill;
@@ -591,7 +616,10 @@ export class SceneManager {
       });
     });
 
-    plan.doors.forEach((d) => {
+    doc.openings.filter((o) => o.kind === 'door' && live(o.lineId)).forEach((o) => {
+      const line = lineOf(o.lineId);
+      if (!line) return;
+      const d = doorRender(line, o);
       const pivot = new THREE.Group();
       const L = d.len / 1000;
       const dh = Math.min(2.05, top);
@@ -606,7 +634,7 @@ export class SceneManager {
       knob.position.set(L - 0.07, Math.min(1, dh - 0.05), 0);
       knob.scale.z = 2.2;
       pivot.add(leaf, knob);
-      const ang = (v: number[]) => Math.atan2(-v[1], v[0]);
+      const ang = (v: Point) => Math.atan2(-v[1], v[0]);
       const door: DoorInst = { pivot, a0: ang(d.closedDir), a1: ang(d.openDir), cur: 0, open: true };
       if (door.a1 - door.a0 > Math.PI) door.a1 -= Math.PI * 2;
       if (door.a0 - door.a1 > Math.PI) door.a1 += Math.PI * 2;
@@ -617,11 +645,16 @@ export class SceneManager {
       this.archUp.add(pivot);
     });
 
-    plan.slides.forEach(({ rect: [x0, y0, x1, y1], vertical: v }) => {
+    doc.openings.filter((o) => o.kind === 'slide' && live(o.lineId)).forEach((o) => {
+      const line = lineOf(o.lineId);
+      if (!line) return;
+      const [x0, y0, x1, y1] = openingRect(line, o);
+      const v = line.axis === 'v';
       const L = (v ? y1 - y0 : x1 - x0) / 1000;
-      const ph = Math.min(v ? 2.4 : 2.1, top);
+      const ph = Math.min((o.head ?? 2400) / 1000, top);
       const pl = L * 0.55;
-      [[-1, -0.02], [1, 0.02]].forEach(([s, off]) => {
+      const dir = o.swing ?? 1;
+      [[-1, -0.02 * dir], [1, 0.02 * dir]].forEach(([s, off]) => {
         const c = s < 0 ? -L / 2 + pl / 2 : L / 2 - pl / 2;
         const x = v ? this.wx((x0 + x1) / 2) + off : this.wx(x0) + L / 2 + c;
         const z = v ? this.wz(y0) + L / 2 + c : this.wz((y0 + y1) / 2) + off;
@@ -665,11 +698,11 @@ export class SceneManager {
       el?.remove();
       this.labelG.remove(o);
     });
-    const { nm } = this.glue.getI18n();
-    plan.rooms.filter((r) => r.labelAt).forEach((r) => {
+    const { rn } = this.glue.getI18n();
+    this.state.layout.rooms.filter((r) => r.labelAt).forEach((r) => {
       const el = document.createElement('div');
       el.className = 'rlabel';
-      el.innerHTML = `${escapeHtml(nm(this.state.rooms[r.id]?.name ?? r.name))}<small>${areaOf(r.poly).toFixed(1)}m²</small>`;
+      el.innerHTML = `${escapeHtml(rn(r))}<small>${areaOf(r.poly).toFixed(1)}m²</small>`;
       const o = new CSS2DObject(el);
       o.position.set(this.wx(r.labelAt![0]), this.opt.cut + 0.15, this.wz(r.labelAt![1]));
       o.visible = this.labelG.visible;
@@ -770,7 +803,7 @@ export class SceneManager {
 
   flyRoom(id: string) {
     if (!this.active || this.anim) return;
-    const r = plan.rooms.find((x) => x.id === id);
+    const r = this.state.layout.rooms.find((x) => x.id === id);
     if (!r) return;
     if (this.opt.mode === 'walk') this.setCameraMode('orbit');
     const xs = r.poly.map((p) => p[0]);
@@ -837,7 +870,7 @@ export class SceneManager {
       a.distanceTo(px(hit.clone().add(new THREE.Vector3(1, 0, 0)).project(this.camera))),
       a.distanceTo(px(hit.clone().add(new THREE.Vector3(0, 0, 1)).project(this.camera))),
     ) / 1000;
-    return { x: hit.x * 1000 + plan.origin[0], y: hit.z * 1000 + plan.origin[1], s };
+    return { x: hit.x * 1000 + this.state.layout.origin[0], y: hit.z * 1000 + this.state.layout.origin[1], s };
   }
 
   setSelection(sel: Selection | null) {
@@ -927,13 +960,16 @@ export class SceneManager {
     this.fly = null;
     if (m === 'walk') {
       this.glue.onSelect(null);
-      if (this.opt.cut < plan.floorHeight) {
-        this.opt.cut = plan.floorHeight;
+      if (this.opt.cut < this.state.layout.floorHeight) {
+        this.opt.cut = this.state.layout.floorHeight;
         this.sync(true);
       }
+      const b = this.state.layout.bounds;
+      const cx = b.x + b.w / 2;
+      const cy = b.y + b.h / 2;
       this.orbit.enabled = false;
-      this.camera.position.set(this.wx(4200), 1.6, this.wz(8755));
-      this.camera.lookAt(this.wx(7000), 1.5, this.wz(8755));
+      this.camera.position.set(this.wx(cx), 1.6, this.wz(cy));
+      this.camera.lookAt(this.wx(cx + 1500), 1.5, this.wz(cy));
       this.glue.onHint(this.hintWalk());
     } else {
       this.walkCtl.unlock();
@@ -1030,6 +1066,7 @@ export class SceneManager {
 
   dispose() {
     this.active = false;
+    this.unsubCommit?.();
     cancelAnimationFrame(this.raf);
     this.raf = 0;
     if (!this.inited) return;
@@ -1072,6 +1109,11 @@ export class SceneManager {
       if (t >= 1) this.fly = null;
     } else if (this.opt.mode === 'orbit') this.orbit.update();
     else this.stepWalk(dt);
+
+    if (this.active && this.dirtyAt && now - this.dirtyAt > 180) {
+      this.dirtyAt = 0;
+      this.sync();
+    }
 
     this.doors.forEach((d) => {
       const tg = d.open ? d.a1 : d.a0;

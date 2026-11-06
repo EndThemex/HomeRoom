@@ -10,4 +10,6 @@ export interface StageApi {
   zoomBy(k: number): void;
   /** 按 1:ratio 比例显示 */
   setRatio?(ratio: number): void;
+  /** 取消当前绘制 / 拖拽会话，返回是否确有进行中的会话 */
+  cancelEdit?(): boolean;
 }

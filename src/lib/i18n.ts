@@ -26,7 +26,10 @@ export const LANGS: Lang[] = ['zh', 'en'];
 export function createI18n(lang: Lang) {
   const t = (zh: string, en: string) => (lang === 'en' ? en : zh);
   const nm = (zh: string) => (lang === 'en' ? NAMES_EN[zh] ?? zh : zh);
-  return { lang, t, nm };
+  /** 房间名：优先使用房间自身的英文名 */
+  const rn = (r: { name: string; nameEn?: string }) =>
+    (lang === 'en' ? (r.nameEn || NAMES_EN[r.name] || r.name) : r.name);
+  return { lang, t, nm, rn };
 }
 
 export type I18n = ReturnType<typeof createI18n>;

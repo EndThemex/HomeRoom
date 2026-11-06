@@ -3,9 +3,12 @@ import type { CatalogItem, Layers, Selection, Tool, ViewMode, ViewTransform } fr
 import { designStore } from './lib/store';
 import { createI18n, type Lang } from './lib/i18n';
 import type { I18n } from './lib/i18n';
-import { defaultDesign, LANG_KEY, makeFurniture, normalizeDesign, PANES_KEY, plan, snapRects } from './lib/plan';
+import { LANG_KEY, PANES_KEY, normalizeDesign } from './lib/planDoc';
+import { makeFurniture } from './lib/plan';
 import { pushOut } from './lib/snap';
-import { normAngle } from './lib/geometry';
+import { areaOf, normAngle } from './lib/geometry';
+import { openingRect } from './lib/openings';
+import { deleteOpening, deleteWallLine, wallRectsOf } from './lib/layoutOps';
 import { Header } from './components/Header';
 import { Library } from './components/Library';
 import { Panel } from './components/Panel';
@@ -32,7 +35,7 @@ export function App() {
   const [viewMode, setViewMode] = useState<ViewMode>('2d');
   const [tool, setTool] = useState<Tool>('select');
   const [selection, setSelection] = useState<Selection | null>(null);
-  const [layers, setLayers] = useState<Layers>({ dims: true, labels: true, furn: true, grid: true, bearing: true, wallSnap: true });
+  const [layers, setLayers] = useState<Layers>({ dims: true, labels: true, furn: true, grid: true, bearing: true, wallSnap: true, walls: true, openings: true });
   const [cameraMode, setCameraMode] = useState<'orbit' | 'walk'>('orbit');
   const [walkLocked, setWalkLocked] = useState(false);
   const [touchWalk, setTouchWalk] = useState(false);
@@ -90,11 +93,19 @@ export function App() {
   /* ---------------------------- 添加 / 编辑家具 ---------------------------- */
   const addFurniture = useCallback((item: CatalogItem, x: number, y: number) => {
     const f = makeFurniture({ type: item.type, name: item.name, cx: x, cy: y, w: item.w, d: item.d, color: item.color });
-    pushOut(f, snapRects(state.demolished));
+    const doc = store.getState().layout;
+    const rects: { x0: number; y0: number; x1: number; y1: number }[] = wallRectsOf(doc, store.getState().demolishedLines);
+    doc.openings.forEach((o) => {
+      const line = doc.lines.find((l) => l.id === o.lineId);
+      if (!line) return;
+      const [x0, y0, x1, y1] = openingRect(line, o);
+      rects.push({ x0, y0, x1, y1 });
+    });
+    pushOut(f, rects);
     store.mutate((d) => { d.furniture.push(f); });
     setSelection({ kind: 'furn', id: f.id });
     say(i18n.t(`已添加：${i18n.nm(item.name)}`, `Added: ${i18n.nm(item.name)}`));
-  }, [i18n, say, state.demolished]);
+  }, [i18n, say]);
 
   const dropCenter = useCallback((): { x: number; y: number } | null => {
     const r = stageRef.current?.getBoundingClientRect();
@@ -146,13 +157,17 @@ export function App() {
     };
   }, [addFurniture, dropCenter]);
 
-  const toggleWall = useCallback((id: string) => {
-    const on = state.demolished.includes(id);
-    store.mutate((d) => {
-      d.demolished = on ? d.demolished.filter((x) => x !== id) : [...d.demolished, id];
-    });
-    say(on ? i18n.t('已恢复墙体', 'Wall restored') : i18n.t('已拆除该段墙体（可撤销）', 'Wall demolished (undoable)'));
-  }, [i18n, say, state.demolished]);
+  const deleteSelection = useCallback(() => {
+    if (!selection) return;
+    if (selection.kind === 'furn') {
+      store.mutate((d) => { d.furniture = d.furniture.filter((x) => x.id !== selection.id); });
+    } else if (selection.kind === 'wall') {
+      store.mutateLayout((layout) => { deleteWallLine(layout, selection.id); });
+    } else if (selection.kind !== 'room') {
+      store.mutateLayout((layout) => { deleteOpening(layout, selection.id); });
+    }
+    setSelection(null);
+  }, [selection]);
 
   const onMeasure = useCallback((a: [number, number], b: [number, number]) => {
     store.mutate((d) => { d.measures.push({ a: { x: a[0], y: a[1] }, b: { x: b[0], y: b[1] } }); });
@@ -188,6 +203,7 @@ export function App() {
       if (mod) return;
       switch (e.key) {
         case 'Escape':
+          if (viewMode === '2d' && stageApiRef.current?.cancelEdit?.()) break;
           setSelection(null);
           setTool('select');
           break;
@@ -195,14 +211,16 @@ export function App() {
           setViewModeSafe(viewMode === '2d' ? '3d' : '2d');
           break;
         case 'v': case 'V': if (viewMode === '2d') setTool('select'); break;
+        case 'w': case 'W': if (viewMode === '2d') setTool('wall'); break;
+        case 'q': case 'Q': if (viewMode === '2d') setTool('room'); break;
+        case 'r': case 'R': rotateSel(e.shiftKey ? -1 : 1); break;
+        case 'd': case 'D': if (viewMode === '2d') setTool('door'); break;
+        case 'n': case 'N': if (viewMode === '2d') setTool('window'); break;
+        case 's': case 'S': if (viewMode === '2d') setTool('slide'); break;
         case 'm': case 'M': if (viewMode === '2d') setTool('measure'); break;
         case 'x': case 'X': if (viewMode === '2d') setTool('demolish'); break;
-        case 'r': case 'R': rotateSel(e.shiftKey ? -1 : 1); break;
         case 'Delete': case 'Backspace':
-          if (selection?.kind === 'furn') {
-            store.mutate((d) => { d.furniture = d.furniture.filter((x) => x.id !== selection.id); });
-            setSelection(null);
-          }
+          deleteSelection();
           break;
         case 'f': case 'F':
           if (e.shiftKey) toggleFullscreen();
@@ -217,7 +235,7 @@ export function App() {
     };
     addEventListener('keydown', onKey);
     return () => removeEventListener('keydown', onKey);
-  }, [selection, state.furniture, viewMode, rotateSel, setViewModeSafe]);
+  }, [selection, state.furniture, viewMode, rotateSel, setViewModeSafe, deleteSelection]);
 
   /* ---------------------------- 导出 ---------------------------- */
   const download = (href: string, name: string) => {
@@ -260,7 +278,7 @@ export function App() {
   }, [i18n, say, viewMode]);
 
   const exportJson = useCallback(() => {
-    const blob = new Blob([JSON.stringify({ version: 1, plan: 'floorplan.json', state }, null, 2)], { type: 'application/json' });
+    const blob = new Blob([JSON.stringify({ version: 2, state }, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     download(url, `homeroom-plan-${Date.now()}.json`);
     setTimeout(() => URL.revokeObjectURL(url), 1000);
@@ -282,7 +300,7 @@ export function App() {
   }, [i18n, say]);
 
   const resetPlan = useCallback(() => {
-    store.mutate((d) => { Object.assign(d, defaultDesign()); });
+    store.reset();
     setSelection(null);
     say(i18n.t('已重置为默认方案（可撤销）', 'Reset to default (undoable)'));
   }, [say, i18n]);
@@ -307,12 +325,9 @@ export function App() {
       : sceneRef.current?.hint() ?? '');
   }, [i18n, touchWalk]);
 
-  const netArea = plan.rooms.filter((r) => r.counted !== false).reduce((a, r) => {
-    return a + Math.abs(r.poly.reduce((s, p, i) => {
-      const q = r.poly[(i + 1) % r.poly.length];
-      return s + p[0] * q[1] - q[0] * p[1];
-    }, 0)) / 2 / 1e6;
-  }, 0);
+  const netArea = state.layout.rooms
+    .filter((r) => r.counted !== false)
+    .reduce((a, r) => a + areaOf(r.poly), 0);
 
   const toggleLayer = (k: keyof Layers) => setLayers((l) => ({ ...l, [k]: !l[k] }));
 
@@ -375,6 +390,7 @@ export function App() {
             i18n={i18n}
             viewMode={viewMode}
             selection={selection}
+            rooms={state.layout.rooms}
             onDragStart={onLibraryDown}
             onFlyRoom={(id) => sceneRef.current?.flyRoom(id)}
             onSelectRoom={(id) => setSelection({ kind: 'room', id })}
@@ -391,8 +407,8 @@ export function App() {
             i18n={i18n}
             stageApiRef={stageApiRef}
             onSelect={setSelection}
-            onToggleWall={toggleWall}
             onMeasure={onMeasure}
+            onToast={say}
           />
 
           <View3D
@@ -449,7 +465,7 @@ export function App() {
           <span id="coord">{viewMode === '2d' ? i18n.t('拖动查看坐标', 'Move to inspect coordinates') : i18n.t('3D 场景 · 拖动家具可摆放', '3D scene · drag furniture to place')}</span>
           <span>{i18n.t('家具', 'Furniture')} {state.furniture.length} {i18n.t('件', 'pcs')}</span>
           <span>{i18n.t('套内', 'Net')} {netArea.toFixed(2)} m²</span>
-          <span>{i18n.t('房间', 'Rooms')} {plan.rooms.filter((r) => r.counted !== false).length}</span>
+          <span>{i18n.t('房间', 'Rooms')} {state.layout.rooms.filter((r) => r.counted !== false).length}</span>
           {viewMode === '2d' && <span>{i18n.t('Shift+滚轮 缩放 · 空格拖动平移', 'Shift+wheel zoom · drag to pan')}</span>}
         </div>
         <div className="fg right">

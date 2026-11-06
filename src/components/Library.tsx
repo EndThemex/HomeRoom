@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
-import type { CatalogItem, Selection, ViewMode } from '../types';
+import type { CatalogItem, RoomData, Selection, ViewMode } from '../types';
 import { plan } from '../lib/plan';
 import type { I18n } from '../lib/i18n';
 import { furnitureSvg } from './furnitureSvg';
@@ -10,6 +10,7 @@ interface Props {
   i18n: I18n;
   viewMode: ViewMode;
   selection: Selection | null;
+  rooms: RoomData[];
   onDragStart: (item: CatalogItem, e: ReactPointerEvent) => void;
   onFlyRoom: (id: string) => void;
   onSelectRoom: (id: string) => void;
@@ -23,8 +24,8 @@ function Preview({ item }: { item: CatalogItem }) {
   );
 }
 
-export function Library({ i18n, viewMode, selection, onDragStart, onFlyRoom, onSelectRoom }: Props) {
-  const { nm, t } = i18n;
+export function Library({ i18n, viewMode, selection, rooms, onDragStart, onFlyRoom, onSelectRoom }: Props) {
+  const { nm, t, rn } = i18n;
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -36,7 +37,7 @@ export function Library({ i18n, viewMode, selection, onDragStart, onFlyRoom, onS
       <aside className="panel lib open">
         <div className="panel-head">{t('房间列表', 'Rooms')}</div>
         <div className="roomlist" ref={scrollRef}>
-          {plan.rooms.map((r) => (
+          {rooms.map((r) => (
             <button
               key={r.id}
               className={`roomitem${selection?.kind === 'room' && selection.id === r.id ? ' sel' : ''}`}
@@ -44,7 +45,7 @@ export function Library({ i18n, viewMode, selection, onDragStart, onFlyRoom, onS
               onDoubleClick={() => onSelectRoom(r.id)}
               title={t('点击飞到该房间', 'Click to fly to this room')}
             >
-              <span>{nm(r.name)}</span>
+              <span>{rn(r)}</span>
               <small>{fmt(areaOf(r.poly))} m²</small>
             </button>
           ))}

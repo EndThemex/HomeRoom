@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useReducer, useRef, useState, useSyncExternalStore } from 'react';
 import type { MouseEvent as ReactMouseEvent, MutableRefObject, PointerEvent as ReactPointerEvent, SVGProps } from 'react';
-import type { Layers, Point, Selection, Tool, ViewTransform } from '../types';
+import type { DimensionChains, Layers, OpeningData, Point, Selection, Tool, ViewTransform, WallLine } from '../types';
 import type { DesignStore } from '../lib/store';
 import type { I18n } from '../lib/i18n';
 import { areaOf, fmt, normAngle, PX_MM } from '../lib/geometry';
-import { plan, roomById, snapRects } from '../lib/plan';
+import { plan } from '../lib/plan';
+import { segmentsOf, wallRectsOf } from '../lib/layoutOps';
+import { doorRender, openingRect } from '../lib/openings';
 import { pushOut, snapMove, snapPoint } from '../lib/snap';
 import { furnitureSvg } from './furnitureSvg';
 import type { StageApi } from '../lib/stageApi';
+import { useEditSession } from './editor/useEditSession';
 
 interface Props {
   store: DesignStore;
@@ -18,8 +21,8 @@ interface Props {
   i18n: I18n;
   stageApiRef: MutableRefObject<StageApi | null>;
   onSelect: (sel: Selection | null) => void;
-  onToggleWall: (id: string) => void;
   onMeasure: (a: Point, b: Point) => void;
+  onToast: (msg: string) => void;
   stageEl?: HTMLDivElement | null;
 }
 
@@ -32,11 +35,6 @@ type DragState =
 
 const COARSE = typeof window !== 'undefined' && matchMedia('(pointer:coarse)').matches;
 const TAP = COARSE ? 9 : 4;
-
-const NS = 'http://www.w3.org/2000/svg';
-const ST = 'stroke="#3d3a34" stroke-width="1" vector-effect="non-scaling-stroke"';
-const dash = (color = '#b5653a', w = 1.4) =>
-  `stroke="${color}" stroke-width="${w}" stroke-dasharray="5 3" vector-effect="non-scaling-stroke"`;
 
 function buildDefs(): string {
   const m = plan.materials;
@@ -74,7 +72,8 @@ function buildDefs(): string {
   );
 }
 
-function dimChains(): string {
+function dimChains(chains: DimensionChains | null): string {
+  if (!chains) return '';
   const DC = '#7d7160';
   const LS = `stroke="${DC}" stroke-width="1" vector-effect="non-scaling-stroke"`;
   const TK = `stroke="${DC}" stroke-width="2" vector-effect="non-scaling-stroke"`;
@@ -97,14 +96,21 @@ function dimChains(): string {
     });
     return s;
   };
-  const { horizontal, vertical } = plan.dimensionChains;
-  return horizontal.map((c) => chain(true, c.at, c.start, c.segs)).join('') +
-    vertical.map((c) => chain(false, c.at, c.start, c.segs)).join('');
+  return chains.horizontal.map((c) => chain(true, c.at, c.start, c.segs)).join('')
+    + chains.vertical.map((c) => chain(false, c.at, c.start, c.segs)).join('');
 }
 
+const wallFill = (kind: WallLine['kind'], bearing: boolean) => (
+  kind === 'b' ? (bearing ? '#b8412c' : '#26241f')
+    : kind === 'low' ? '#e9e3d8'
+      : kind === 'e' ? '#8f897d'
+        : '#a7a195'
+);
+
 export function Plan2D(props: Props) {
-  const { store, viewRef, tool, selection, layers, i18n, stageApiRef, onSelect, onToggleWall, onMeasure } = props;
+  const { store, viewRef, tool, selection, layers, i18n, stageApiRef, onSelect, onMeasure, onToast } = props;
   const state = useSyncExternalStore(store.subscribe, store.getState);
+  const { layout, demolishedLines } = state;
   const svgRef = useRef<SVGSVGElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const coordRef = useRef<HTMLSpanElement>(null);
@@ -130,11 +136,11 @@ export function Plan2D(props: Props) {
 
   const fitView = useCallback(() => {
     const { w, h } = svgSize();
-    const b = plan.bounds;
+    const b = store.getState().layout.bounds;
     const s = Math.min(w / b.w, h / b.h);
     viewRef.current = { s, x0: b.x - (w / s - b.w) / 2, y0: b.y - (h / s - b.h) / 2 };
     applyView();
-  }, [applyView, viewRef]);
+  }, [applyView, store, viewRef]);
 
   const zoomAt = useCallback((ns: number, mx: number, my: number) => {
     const v = viewRef.current;
@@ -157,6 +163,27 @@ export function Plan2D(props: Props) {
     const { w, h } = svgSize();
     return [v.x0 + ((clientX - rect.left) / w) * (w / v.s), v.y0 + ((clientY - rect.top) / h) * (h / v.s)];
   }, [viewRef]);
+
+  const edit = useEditSession({
+    store, viewRef, tool, selection, layers, i18n, onSelect, onToast, toMM,
+  });
+
+  /** 家具 / 测量吸附矩形：墙块 + 全部洞口（洞口处也视为实体） */
+  const snapRects = useCallback(() => {
+    const doc = store.getState().layout;
+    const demo = store.getState().demolishedLines;
+    const rects: { x0: number; y0: number; x1: number; y1: number }[] = wallRectsOf(doc, demo).map((w) => ({
+      x0: w.x0, y0: w.y0, x1: w.x1, y1: w.y1,
+    }));
+    doc.openings.forEach((o) => {
+      if (demo.includes(o.lineId)) return;
+      const line = doc.lines.find((l) => l.id === o.lineId);
+      if (!line) return;
+      const [x0, y0, x1, y1] = openingRect(line, o);
+      rects.push({ x0, y0, x1, y1 });
+    });
+    return rects;
+  }, [store]);
 
   // 首次挂载后适应窗口；窗口尺寸变化时保持中心
   useEffect(() => {
@@ -205,19 +232,13 @@ export function Plan2D(props: Props) {
         viewRef.current = { s, x0: cx - w / 2 / s, y0: cy - h / 2 / s };
         applyView();
       },
+      cancelEdit: edit.cancel,
     };
     return () => { stageApiRef.current = null; };
-  }, [applyView, fitView, zoomCenter, stageApiRef, toMM, viewRef]);
+  }, [applyView, edit.cancel, fitView, zoomCenter, stageApiRef, toMM, viewRef]);
 
   // 工具切换时清空测量临时点
   useEffect(() => { setMeasure({ a: null, cur: null }); }, [tool]);
-
-  useEffect(() => {
-    if (tool === 'measure' && measure.a && measure.cur) {
-      const el = svgRef.current;
-      if (el) el.setAttribute('class', 'tool-measure');
-    }
-  }, [tool, measure.a, measure.cur]);
 
   const endDrag = (cancel: boolean) => {
     const d = dragRef.current;
@@ -248,6 +269,7 @@ export function Plan2D(props: Props) {
       e.currentTarget.setPointerCapture(e.pointerId);
       if (pointers.current.size >= 2) {
         endDrag(true);
+        edit.cancel();
         const [a, b] = [...pointers.current.values()];
         const svg = svgRef.current!;
         const r = svg.getBoundingClientRect();
@@ -265,8 +287,10 @@ export function Plan2D(props: Props) {
     if (pinchRef.current) return;
 
     const p = toMM(e.clientX, e.clientY);
+
+    // 测量工具保持原有独立逻辑
     if (tool === 'measure') {
-      const q = snapPoint(p, e.shiftKey, measure.a, snapRects(state.demolished), viewRef.current.s);
+      const q = snapPoint(p, e.shiftKey, measure.a, snapRects(), viewRef.current.s);
       if (!measure.a) {
         setMeasure({ a: q, cur: q });
         dragRef.current = { kind: 'measure', sx: e.clientX, sy: e.clientY, moved: false };
@@ -283,18 +307,26 @@ export function Plan2D(props: Props) {
     if (handle && selection?.kind === 'furn') {
       const kind = handle.dataset.handle === 'rot' ? 'rot' : 'size';
       dragRef.current = { kind, id: selection.id, sx: e.clientX, sy: e.clientY, before: store.snapshot(), moved: false };
-    } else if (tool === 'demolish' && target.closest('[data-wall]')) {
-      onToggleWall((target.closest('[data-wall]') as HTMLElement).dataset.wall!);
+      e.currentTarget.setPointerCapture(e.pointerId);
       return;
-    } else if (tool === 'select' && target.closest('[data-fid]')) {
+    }
+    if (tool === 'select' && target.closest('[data-fid]')) {
       const fid = (target.closest('[data-fid]') as HTMLElement).dataset.fid!;
       if (selection?.id !== fid) onSelect({ kind: 'furn', id: fid });
       const f = state.furniture.find((x) => x.id === fid)!;
       dragRef.current = { kind: 'move', id: fid, sx: e.clientX, sy: e.clientY, ox: p[0] - f.cx, oy: p[1] - f.cy, before: store.snapshot(), moved: false };
-    } else {
-      const room = target.closest('[data-room]') as HTMLElement | null;
-      dragRef.current = { kind: 'pan', sx: e.clientX, sy: e.clientY, x0: viewRef.current.x0, y0: viewRef.current.y0, room: room?.dataset.room ?? null, moved: false };
+      e.currentTarget.setPointerCapture(e.pointerId);
+      return;
     }
+
+    // 墙体 / 门窗 / 新建工具交给编辑器会话
+    if (edit.pointerDown(e.clientX, e.clientY, e.altKey)) {
+      e.currentTarget.setPointerCapture(e.pointerId);
+      return;
+    }
+
+    const room = target.closest('[data-room]') as HTMLElement | null;
+    dragRef.current = { kind: 'pan', sx: e.clientX, sy: e.clientY, x0: viewRef.current.x0, y0: viewRef.current.y0, room: room?.dataset.room ?? null, moved: false };
     e.currentTarget.setPointerCapture(e.pointerId);
   };
 
@@ -315,10 +347,13 @@ export function Plan2D(props: Props) {
 
     const p = toMM(e.clientX, e.clientY);
     if (coordRef.current) coordRef.current.textContent = `X ${Math.round(p[0])} · Y ${Math.round(p[1])} mm`;
+
+    if (edit.pointerMove(e.clientX, e.clientY, e.altKey)) return;
+
     const d = dragRef.current;
     if (!d) {
       if (tool === 'measure' && measure.a) {
-        setMeasure((m) => ({ ...m, cur: snapPoint(p, e.shiftKey, m.a, snapRects(state.demolished), viewRef.current.s) }));
+        setMeasure((m) => ({ ...m, cur: snapPoint(p, e.shiftKey, m.a, snapRects(), viewRef.current.s) }));
       }
       return;
     }
@@ -326,7 +361,7 @@ export function Plan2D(props: Props) {
     const far = Math.hypot(e.clientX - d.sx, e.clientY - d.sy) >= TAP;
     if (d.kind === 'measure') {
       if (far) d.moved = true;
-      setMeasure((m) => ({ ...m, cur: snapPoint(p, e.shiftKey, m.a, snapRects(state.demolished), viewRef.current.s) }));
+      setMeasure((m) => ({ ...m, cur: snapPoint(p, e.shiftKey, m.a, snapRects(), viewRef.current.s) }));
       return;
     }
     if (d.kind === 'pan') {
@@ -344,7 +379,7 @@ export function Plan2D(props: Props) {
     d.moved = true;
 
     if (d.kind === 'move') {
-      const [cx, cy] = snapMove(f, p[0] - d.ox, p[1] - d.oy, snapRects(state.demolished), layers.wallSnap, viewRef.current.s);
+      const [cx, cy] = snapMove(f, p[0] - d.ox, p[1] - d.oy, snapRects(), layers.wallSnap, viewRef.current.s);
       store.applyTransient(() => { f.cx = cx; f.cy = cy; });
     } else if (d.kind === 'rot') {
       const a = Math.atan2(p[1] - f.cy, p[0] - f.cx) * 180 / Math.PI + 90;
@@ -378,6 +413,10 @@ export function Plan2D(props: Props) {
       if (pointers.current.size < 2) pinchRef.current = null;
       return;
     }
+    if (edit.pointerUp()) {
+      dragRef.current = null;
+      return;
+    }
     endDrag(e.type === 'pointercancel');
   };
 
@@ -392,6 +431,15 @@ export function Plan2D(props: Props) {
     }
   };
 
+  const walls = wallRectsOf(layout, demolishedLines);
+  const demLines = layout.lines.filter((l) => demolishedLines.includes(l.id));
+  const openingLine = (o: OpeningData) => layout.lines.find((l) => l.id === o.lineId) ?? null;
+  const liveOpenings = layout.openings.filter((o) => !demolishedLines.includes(o.lineId));
+  const entryDoor = liveOpenings.find((o) => o.kind === 'door' && o.entry);
+  const selLine = selection?.kind === 'wall' ? layout.lines.find((l) => l.id === selection.id) : null;
+  const selOpening = selection && (selection.kind === 'door' || selection.kind === 'window' || selection.kind === 'slide')
+    ? layout.openings.find((o) => o.id === selection.id) : null;
+  const k = 1 / viewRef.current.s;
   const { s } = viewRef.current;
   const ratio = 1 / (s * PX_MM);
   const nice = [100, 200, 500, 1000, 2000, 5000].find((v) => v * s >= 60) ?? 5000;
@@ -417,18 +465,23 @@ export function Plan2D(props: Props) {
         </g>
 
         <g>
-          {plan.rooms.map((r) => (
+          {layout.rooms.map((r) => (
             <polygon
               key={r.id}
               className="room"
               data-room={r.id}
               points={r.poly.map((p) => p.join(',')).join(' ')}
-              fill={`url(#m-${state.rooms[r.id]?.mat ?? r.mat})`}
+              fill={`url(#m-${r.mat})`}
             />
           ))}
-          {[...plan.doors.map((d) => d.rect), ...plan.slides.map((d) => d.rect)].map((rect, i) => (
-            <rect key={'sill' + i} x={rect[0]} y={rect[1]} width={rect[2] - rect[0]} height={rect[3] - rect[1]} fill="#e2dacb" stroke="#b9b0a0" strokeWidth={1} vectorEffect="non-scaling-stroke" pointerEvents="none" />
-          ))}
+          {liveOpenings.filter((o) => o.kind !== 'window').map((o) => {
+            const line = openingLine(o);
+            if (!line) return null;
+            const rect = openingRect(line, o);
+            return (
+              <rect key={'sill' + o.id} x={rect[0]} y={rect[1]} width={rect[2] - rect[0]} height={rect[3] - rect[1]} fill="#e2dacb" stroke="#b9b0a0" strokeWidth={1} vectorEffect="non-scaling-stroke" pointerEvents="none" />
+            );
+          })}
         </g>
 
         <g display={layers.furn ? 'inline' : 'none'}>
@@ -449,51 +502,78 @@ export function Plan2D(props: Props) {
           })}
         </g>
 
-        <g>
-          {plan.walls.map((w, i) => {
-            const id = 'w' + i;
-            const dem = state.demolished.includes(id);
-            let fill = w.kind === 'b' ? (layers.bearing ? '#b8412c' : '#26241f') : w.kind === 'low' ? '#e9e3d8' : w.kind === 'e' ? '#8f897d' : '#a7a195';
-            let extra: SVGProps<SVGRectElement> = {};
-            if (dem) {
-              fill = 'rgba(198,91,58,.12)';
-              extra = { stroke: '#c65b3a', strokeWidth: 1.2, strokeDasharray: '5 3', vectorEffect: 'non-scaling-stroke' };
-            } else if (w.kind === 'low') {
-              extra = { stroke: '#8f897d', strokeWidth: 1, vectorEffect: 'non-scaling-stroke' };
-            }
-            return (
+        {layers.walls && (
+          <g>
+            {walls.map((w) => {
+              const extra: SVGProps<SVGRectElement> = w.kind === 'low'
+                ? { stroke: '#8f897d', strokeWidth: 1, vectorEffect: 'non-scaling-stroke' }
+                : {};
+              return (
+                <rect
+                  key={w.id}
+                  className="wall"
+                  data-wall={w.lineId}
+                  x={w.x0}
+                  y={w.y0}
+                  width={w.x1 - w.x0}
+                  height={w.y1 - w.y0}
+                  fill={wallFill(w.kind as WallLine['kind'], layers.bearing)}
+                  {...extra}
+                />
+              );
+            })}
+            {demLines.flatMap((line) => segmentsOf(line, layout.openings)).map((w) => (
               <rect
-                key={id}
-                className="wall"
-                data-wall={id}
+                key={'dem' + w.id}
                 x={w.x0}
                 y={w.y0}
                 width={w.x1 - w.x0}
                 height={w.y1 - w.y0}
-                fill={fill}
-                pointerEvents={tool === 'demolish' ? 'all' : 'none'}
-                {...extra}
+                fill="rgba(198,91,58,.12)"
+                stroke="#c65b3a"
+                strokeWidth={1.2}
+                strokeDasharray="5 3"
+                vectorEffect="non-scaling-stroke"
               />
-            );
-          })}
-        </g>
+            ))}
+            {selLine && segmentsOf(selLine, layout.openings).map((w) => (
+              <rect
+                key={'sel' + w.id}
+                x={w.x0}
+                y={w.y0}
+                width={w.x1 - w.x0}
+                height={w.y1 - w.y0}
+                fill="rgba(181,101,58,.35)"
+                stroke="#b5653a"
+                strokeWidth={1.5}
+                vectorEffect="non-scaling-stroke"
+                pointerEvents="none"
+              />
+            ))}
+          </g>
+        )}
 
-        <g>
-          {plan.windows.map((w, i) => {
-            const width = w.x1 - w.x0;
-            const height = w.y1 - w.y0;
-            const WS = 'stroke="#4f7394" stroke-width="1" vector-effect="non-scaling-stroke"';
+        <g display={layers.openings ? 'inline' : 'none'}>
+          {liveOpenings.filter((o) => o.kind === 'window').map((o) => {
+            const line = openingLine(o);
+            if (!line) return null;
+            const [x0, y0, x1, y1] = openingRect(line, o);
+            const width = x1 - x0;
+            const height = y1 - y0;
             return (
-              <g key={'win' + i}>
-                <rect x={w.x0} y={w.y0} width={width} height={height} fill="#f7fbfd" stroke="#4f7394" strokeWidth={1} vectorEffect="non-scaling-stroke" pointerEvents="none" />
+              <g key={'win' + o.id}>
+                <rect x={x0} y={y0} width={width} height={height} fill="#f7fbfd" stroke="#4f7394" strokeWidth={1} vectorEffect="non-scaling-stroke" pointerEvents="none" />
                 {width >= height
-                  ? [1 / 3, 2 / 3].map((t) => <line key={t} x1={w.x0} y1={w.y0 + height * t} x2={w.x1} y2={w.y0 + height * t} {...{ stroke: '#4f7394', strokeWidth: 1, vectorEffect: 'non-scaling-stroke' }} />)
-                  : [1 / 3, 2 / 3].map((t) => <line key={t} x1={w.x0 + width * t} y1={w.y0} x2={w.x0 + width * t} y2={w.y1} {...{ stroke: '#4f7394', strokeWidth: 1, vectorEffect: 'non-scaling-stroke' }} />)}
+                  ? [1 / 3, 2 / 3].map((t) => <line key={t} x1={x0} y1={y0 + height * t} x2={x1} y2={y0 + height * t} stroke="#4f7394" strokeWidth={1} vectorEffect="non-scaling-stroke" />)
+                  : [1 / 3, 2 / 3].map((t) => <line key={t} x1={x0 + width * t} y1={y0} x2={x0 + width * t} y2={y1} stroke="#4f7394" strokeWidth={1} vectorEffect="non-scaling-stroke" />)}
               </g>
             );
           })}
 
-          {plan.doors.map((d) => {
+          {liveOpenings.filter((o) => o.kind === 'door').map((o) => {
+            const line = openingLine(o);
+            if (!line) return null;
+            const d = doorRender(line, o);
             const [hx, hy] = d.hinge;
             const L = d.len;
             const T = 40;
@@ -504,20 +584,25 @@ export function Plan2D(props: Props) {
             const sweep = d.openDir[0] * d.closedDir[1] - d.openDir[1] * d.closedDir[0] > 0 ? 1 : 0;
             const col = d.entry ? '#b5653a' : '#3d3a34';
             return (
-              <g key={d.name} pointerEvents="none">
+              <g key={o.id} pointerEvents="none">
                 <polygon points={`${hx},${hy} ${ox},${oy} ${ox + d.closedDir[0] * T},${oy + d.closedDir[1] * T} ${hx + d.closedDir[0] * T},${hy + d.closedDir[1] * T}`} fill="#fff" stroke={col} strokeWidth={d.entry ? 1.8 : 1} vectorEffect="non-scaling-stroke" />
                 <path d={`M${ox} ${oy}A${L} ${L} 0 0 ${sweep} ${cx} ${cy}`} fill="none" stroke="#3d3a34" strokeWidth={1} vectorEffect="non-scaling-stroke" strokeDasharray="5 3" opacity={0.7} />
               </g>
             );
           })}
 
-          {plan.slides.map(({ rect: [x0, y0, x1, y1], vertical }, i) => {
+          {liveOpenings.filter((o) => o.kind === 'slide').map((o) => {
+            const line = openingLine(o);
+            if (!line) return null;
+            const [x0, y0, x1, y1] = openingRect(line, o);
+            const vertical = line.axis === 'v';
+            const dir = o.swing ?? 1;
             const DS = { stroke: '#3d3a34', strokeWidth: 1, vectorEffect: 'non-scaling-stroke' as const };
             if (vertical) {
               const L = y1 - y0;
               const m = (x0 + x1) / 2;
               return (
-                <g key={'slide' + i} pointerEvents="none">
+                <g key={o.id} pointerEvents="none">
                   <rect x={m - 45} y={y0} width={40} height={L * 0.55} fill="#fff" {...DS} />
                   <rect x={m + 5} y={y1 - L * 0.55} width={40} height={L * 0.55} fill="#fff" {...DS} />
                 </g>
@@ -526,46 +611,48 @@ export function Plan2D(props: Props) {
             const L = x1 - x0;
             const m = (y0 + y1) / 2;
             return (
-              <g key={'slide' + i} pointerEvents="none">
+              <g key={o.id} pointerEvents="none">
                 <rect x={x0} y={m - 45} width={L * 0.55} height={40} fill="#fff" {...DS} />
                 <rect x={x1 - L * 0.55} y={m + 5} width={L * 0.55} height={40} fill="#fff" {...DS} />
               </g>
             );
           })}
 
-          {(() => {
-            const entry = plan.doors.find((d) => d.entry);
-            if (!entry) return null;
-            const cy = (entry.rect[1] + entry.rect[3]) / 2;
-            const x1 = entry.rect[0] - 170;
-            const x0 = x1 - 1000;
+          {entryDoor && (() => {
+            const line = openingLine(entryDoor);
+            if (!line) return null;
+            const d = doorRender(line, entryDoor);
+            const mid = [d.hinge[0] + d.closedDir[0] * d.len / 2, d.hinge[1] + d.closedDir[1] * d.len / 2];
+            const half = (line.band[1] - line.band[0]) / 2;
+            const out = [mid[0] + d.openDir[0] * (half + 900), mid[1] + d.openDir[1] * (half + 900)];
+            const x1 = out[0] - d.openDir[0] * 300;
+            const y1 = out[1] - d.openDir[1] * 300;
             return (
               <g pointerEvents="none">
-                <path d={`M${x0} ${cy}H${x1}M${x1 - 250} ${cy - 155}L${x1} ${cy}L${x1 - 250} ${cy + 155}`} fill="none" stroke="#b5653a" strokeWidth={2} vectorEffect="non-scaling-stroke" />
-                <text x={x0 + 30} y={cy - 155} fontSize={200} fill="#b5653a">{i18n.t('入户', 'Entry')}</text>
+                <path d={`M${out[0]} ${out[1]}L${x1} ${y1}`} fill="none" stroke="#b5653a" strokeWidth={2} vectorEffect="non-scaling-stroke" />
+                <text x={out[0] + 30} y={out[1] - 150} fontSize={200} fill="#b5653a">{i18n.t('入户', 'Entry')}</text>
               </g>
             );
           })()}
         </g>
 
         <g display={layers.labels ? 'inline' : 'none'}>
-          {plan.rooms.filter((r) => r.labelAt).map((r) => {
+          {layout.rooms.filter((r) => r.labelAt).map((r) => {
             const [x, y] = r.labelAt!;
             const halo = { stroke: '#fbf9f4', strokeWidth: 45, paintOrder: 'stroke' as const, strokeLinejoin: 'round' as const };
             return (
               <g key={r.id} pointerEvents="none">
-                <text x={x} y={y} fontSize={250} fontWeight={600} textAnchor="middle" fill="#2b2824" {...halo}>{i18n.nm(state.rooms[r.id]?.name ?? r.name)}</text>
+                <text x={x} y={y} fontSize={250} fontWeight={600} textAnchor="middle" fill="#2b2824" {...halo}>{i18n.rn(r)}</text>
                 <text x={x} y={y + 260} fontSize={175} textAnchor="middle" fill="#7d7366" {...halo}>{fmt(areaOf(r.poly))} m²</text>
               </g>
             );
           })}
         </g>
 
-        <g display={layers.dims ? 'inline' : 'none'} pointerEvents="none" dangerouslySetInnerHTML={{ __html: dimChains() }} />
+        <g display={layers.dims ? 'inline' : 'none'} pointerEvents="none" dangerouslySetInnerHTML={{ __html: dimChains(layout.dimensionChains) }} />
 
         <g pointerEvents="none">
           {[...state.measures.map((m) => ({ a: m.a, b: m.b, tmp: false })), ...(measure.a && measure.cur ? [{ a: { x: measure.a[0], y: measure.a[1] }, b: { x: measure.cur[0], y: measure.cur[1] }, tmp: true }] : [])].map((m, i) => {
-            const k = 1 / s;
             const fs = 12 * k;
             const L = Math.hypot(m.b.x - m.a.x, m.b.y - m.a.y);
             if (L < 1) return null;
@@ -590,11 +677,69 @@ export function Plan2D(props: Props) {
           {measure.a && <circle cx={measure.a[0]} cy={measure.a[1]} r={3 / s} fill="#2f5d62" />}
         </g>
 
+        <g pointerEvents="none">
+          {edit.preview?.kind === 'wall' && (
+            <g>
+              <rect
+                x={edit.preview.rect[0]}
+                y={edit.preview.rect[1]}
+                width={edit.preview.rect[2] - edit.preview.rect[0]}
+                height={edit.preview.rect[3] - edit.preview.rect[1]}
+                fill="rgba(47,93,98,.28)"
+                stroke="#2f5d62"
+                strokeWidth={1.5}
+                strokeDasharray="6 4"
+                vectorEffect="non-scaling-stroke"
+              />
+              {edit.preview.len >= 10 && (
+                <text
+                  x={(edit.preview.rect[0] + edit.preview.rect[2]) / 2}
+                  y={(edit.preview.rect[1] + edit.preview.rect[3]) / 2 - 8 * k}
+                  fontSize={12 * k}
+                  textAnchor="middle"
+                  fill="#2f5d62"
+                  fontWeight={600}
+                  stroke="#fff"
+                  strokeWidth={3 * k}
+                  paintOrder="stroke"
+                >
+                  {Math.round(edit.preview.len)} mm
+                </text>
+              )}
+            </g>
+          )}
+          {edit.preview?.kind === 'room' && (
+            <rect
+              x={edit.preview.rect[0]}
+              y={edit.preview.rect[1]}
+              width={edit.preview.rect[2] - edit.preview.rect[0]}
+              height={edit.preview.rect[3] - edit.preview.rect[1]}
+              fill="rgba(47,93,98,.16)"
+              stroke="#2f5d62"
+              strokeWidth={1.5}
+              strokeDasharray="6 4"
+              vectorEffect="non-scaling-stroke"
+            />
+          )}
+          {edit.preview?.kind === 'opening' && (
+            <rect
+              x={edit.preview.rect[0]}
+              y={edit.preview.rect[1]}
+              width={edit.preview.rect[2] - edit.preview.rect[0]}
+              height={edit.preview.rect[3] - edit.preview.rect[1]}
+              fill="rgba(181,101,58,.25)"
+              stroke="#b5653a"
+              strokeWidth={1.5}
+              strokeDasharray="5 3"
+              vectorEffect="non-scaling-stroke"
+            />
+          )}
+        </g>
+
         <g>
           {selection?.kind === 'furn' && (() => {
             const f = state.furniture.find((x) => x.id === selection.id);
             if (!f) return null;
-            const k = 1 / s;
             const p = 5 * k;
             const hs = COARSE ? 1.7 : 1;
             const ro = (COARSE ? 40 : 26) * k;
@@ -624,9 +769,81 @@ export function Plan2D(props: Props) {
             );
           })()}
           {selection?.kind === 'room' && (() => {
-            const r = roomById(selection.id);
+            const r = layout.rooms.find((x) => x.id === selection.id);
             if (!r) return null;
             return <polygon points={r.poly.map((p) => p.join(',')).join(' ')} fill="rgba(181,101,58,.08)" stroke="#b5653a" strokeWidth={2} vectorEffect="non-scaling-stroke" pointerEvents="none" />;
+          })()}
+          {selLine && (() => {
+            const center = (selLine.band[0] + selLine.band[1]) / 2;
+            const mid = (selLine.span[0] + selLine.span[1]) / 2;
+            const A = { stroke: '#b5653a', vectorEffect: 'non-scaling-stroke' as const };
+            const hit = (COARSE ? 24 : 12) * k;
+            const ends: Point[] = selLine.axis === 'h'
+              ? [[selLine.span[0], center], [selLine.span[1], center]]
+              : [[center, selLine.span[0]], [center, selLine.span[1]]];
+            const thick: Point = selLine.axis === 'h' ? [mid, selLine.band[0]] : [selLine.band[0], mid];
+            return (
+              <g>
+                {ends.map((p, i) => (
+                  <g key={i}>
+                    <circle cx={p[0]} cy={p[1]} r={hit} fill="transparent" />
+                    <rect x={p[0] - 5 * k} y={p[1] - 5 * k} width={10 * k} height={10 * k} fill="#fff" {...A} strokeWidth={1.5} />
+                  </g>
+                ))}
+                <g>
+                  <circle cx={thick[0]} cy={thick[1]} r={hit} fill="transparent" />
+                  <rect x={thick[0] - 4 * k} y={thick[1] - 4 * k} width={8 * k} height={8 * k} fill="#2f5d62" />
+                </g>
+                <text
+                  x={mid}
+                  y={center - 28 * k}
+                  fontSize={12 * k}
+                  textAnchor="middle"
+                  fill="#b5653a"
+                  fontWeight={600}
+                  stroke="#fff"
+                  strokeWidth={3 * k}
+                  paintOrder="stroke"
+                >
+                  {Math.round(selLine.span[1] - selLine.span[0])} mm · {Math.round(selLine.band[1] - selLine.band[0])} mm
+                </text>
+              </g>
+            );
+          })()}
+          {selOpening && (() => {
+            const line = openingLine(selOpening);
+            if (!line) return null;
+            const rect = openingRect(line, selOpening);
+            const center = (line.band[0] + line.band[1]) / 2;
+            const ends: Point[] = line.axis === 'h'
+              ? [[selOpening.span[0], center], [selOpening.span[1], center]]
+              : [[center, selOpening.span[0]], [center, selOpening.span[1]]];
+            const A = { stroke: '#b5653a', vectorEffect: 'non-scaling-stroke' as const };
+            const hit = (COARSE ? 24 : 12) * k;
+            return (
+              <g>
+                <rect x={rect[0]} y={rect[1]} width={rect[2] - rect[0]} height={rect[3] - rect[1]} fill="rgba(181,101,58,.18)" {...A} strokeWidth={1.5} pointerEvents="none" />
+                {ends.map((p, i) => (
+                  <g key={i}>
+                    <circle cx={p[0]} cy={p[1]} r={hit} fill="transparent" />
+                    <rect x={p[0] - 5 * k} y={p[1] - 5 * k} width={10 * k} height={10 * k} fill="#fff" {...A} strokeWidth={1.5} />
+                  </g>
+                ))}
+                <text
+                  x={(rect[0] + rect[2]) / 2}
+                  y={(rect[1] + rect[3]) / 2 - 28 * k}
+                  fontSize={12 * k}
+                  textAnchor="middle"
+                  fill="#b5653a"
+                  fontWeight={600}
+                  stroke="#fff"
+                  strokeWidth={3 * k}
+                  paintOrder="stroke"
+                >
+                  {Math.round(selOpening.span[1] - selOpening.span[0])} mm
+                </text>
+              </g>
+            );
           })()}
         </g>
       </svg>
